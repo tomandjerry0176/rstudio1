@@ -21,7 +21,6 @@ for i,rw in S.iterrows():
     if i==14: s0=pd.Timestamp('2026-10-09')
     ax.axvspan(s0,s1+pd.Timedelta(days=1),color=c,alpha=0.10,lw=0,zorder=0)
 cum=d.cum
-ax.plot(d.index,d.cum_user,color=GRAY,lw=1.4,ls='--',label='原方法：|流入|>50 硬阈值（不含11/2）')
 ax.plot(cum.index[:-1],cum[:-1],color=INK,lw=2,label='国家队累计净流入（本文识别）')
 ax.plot(cum.index[-2:],cum[-2:],color=INK,lw=2,ls=':')
 ax.plot(cum.index[-1],cum.iloc[-1],'o',ms=8,mfc='#fcfcfb',mec=INK,mew=2,zorder=5)
@@ -37,7 +36,6 @@ ax.text(pd.Timestamp('2024-09-26'),-2500,'9/24–10/24\n散户主导\n（剔除�
 ax.axhline(0,color=INK2,lw=0.8)
 ax.set_ylabel('累计净流入（亿元）',color=INK2)
 ax.set_title('国家队宽基ETF累计净流入（2023/8/1 起，23只宽基ETF，份额变化×均价）',loc='left',fontsize=14,color=INK,pad=34)
-ax.legend(loc='lower left',frameon=False,fontsize=10)
 g=d.gjd
 bx.bar(d.index[g>0],g[g>0],width=1.6,color=RED,label='国家队买入日')
 bx.bar(d.index[g<0],g[g<0],width=1.6,color=BLUE,label='国家队卖出日')
