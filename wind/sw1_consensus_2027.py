@@ -241,6 +241,36 @@ def note_lines(revision_dates, date=None):
     ]
 
 
+def write_outputs(rows, details, notes, stem, title, out_dir=None):
+    """写 Excel（行业汇总 / 个股明细 / 统计说明）并生成带日期与 latest 两份 HTML 看板。"""
+    out_dir = Path(out_dir or OUT_DIR)
+    summary = pd.DataFrame(rows).sort_values(
+        f"{FORECAST_YEAR}E增速(共同样本)", ascending=False, na_position="last"
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = out_dir / f"{stem}_{DATE}.xlsx"
+    with pd.ExcelWriter(out_file, engine="openpyxl") as xw:
+        summary.to_excel(xw, sheet_name="行业汇总", index=False)
+        pd.concat(details).rename_axis("股票代码").to_excel(xw, sheet_name="个股明细")
+        pd.DataFrame({"统计说明": notes}).to_excel(xw, sheet_name="统计说明", index=False)
+        ws = xw.sheets["行业汇总"]
+        ws.freeze_panes = "B2"
+        ws.auto_filter.ref = ws.dimensions
+        percent_keys = ("覆盖率", "增速", "修正_", "占比", "贡献占比")
+        for column, name in enumerate(summary.columns, start=1):
+            if any(key in name for key in percent_keys):
+                for cells in ws.iter_rows(min_row=2, min_col=column, max_col=column):
+                    cells[0].number_format = "0.00%"
+    print(summary.round(3).to_string(index=False))
+    print(f"已保存：{out_file}")
+
+    from build_dashboard import build
+    for html_file in (out_file.with_suffix(".html"), out_dir / f"{stem}_latest.html"):
+        build(out_file, html_file, title=title)
+        print(f"看板已保存：{html_file}")
+    return out_file
+
+
 def main():
     from WindPy import w
 
@@ -297,32 +327,8 @@ def main():
         details.append(d)
         print(f"完成 {name}: {len(codes)} 只", flush=True)
 
-    summary = pd.DataFrame(rows).sort_values(
-        f"{FORECAST_YEAR}E增速(共同样本)", ascending=False, na_position="last"
-    )
-    notes = pd.DataFrame({"统计说明": note_lines(revision_dates)})
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_file = OUT_DIR / f"申万一级_{FORECAST_YEAR}盈利预期_{DATE}.xlsx"
-    with pd.ExcelWriter(out_file, engine="openpyxl") as xw:
-        summary.to_excel(xw, sheet_name="行业汇总", index=False)
-        pd.concat(details).rename_axis("股票代码").to_excel(xw, sheet_name="个股明细")
-        notes.to_excel(xw, sheet_name="统计说明", index=False)
-        ws = xw.sheets["行业汇总"]
-        ws.freeze_panes = "B2"
-        ws.auto_filter.ref = ws.dimensions
-        percent_keys = ("覆盖率", "增速", "修正_", "占比", "贡献占比")
-        for column, title in enumerate(summary.columns, start=1):
-            if any(key in title for key in percent_keys):
-                for cells in ws.iter_rows(min_row=2, min_col=column, max_col=column):
-                    cells[0].number_format = "0.00%"
-    print(summary.round(3).to_string(index=False))
-    print(f"已保存：{out_file}")
-
-    from build_dashboard import build
-    for html_file in (out_file.with_suffix(".html"),
-                      OUT_DIR / f"申万一级_{FORECAST_YEAR}盈利预期_latest.html"):
-        build(out_file, html_file)
-        print(f"看板已保存：{html_file}")
+    write_outputs(rows, details, note_lines(revision_dates),
+                  f"申万一级_{FORECAST_YEAR}盈利预期", "申万一级行业")
 
 
 if __name__ == "__main__":

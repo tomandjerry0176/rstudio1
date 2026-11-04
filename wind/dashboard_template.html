@@ -209,18 +209,23 @@ const openRows = new Set();
 const CAUTION_FLAGS = ["扭亏驱动", "基期亏损", "小样本"];
 const isCaution = d => d.flags.some(f => CAUTION_FLAGS.includes(f));
 
-const fmtPct = (v, digits = 1) => v == null ? "—" : (v * 100).toFixed(digits) + "%";
-const fmtSignedPct = (v, digits = 1) => v == null ? "—" : (v > 0 ? "+" : "") + (v * 100).toFixed(digits) + "%";
+const zeroSafe = (v, digits) => Math.abs(v * 100) < 0.5 * Math.pow(10, -digits) ? 0 : v;
+const fmtPct = (v, digits = 1) => v == null ? "—" : (zeroSafe(v, digits) * 100).toFixed(digits) + "%";
+const fmtSignedPct = (v, digits = 1) => {
+  if (v == null) return "—";
+  const z = zeroSafe(v, digits);
+  return (z > 0 ? "+" : "") + (z * 100).toFixed(digits) + "%";
+};
 const fmtNum = (v, digits = 0) => v == null ? "—" : v.toLocaleString("zh-CN", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 const fmtX = v => v == null ? "—" : v.toFixed(1) + "x";
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 /* ---------- header & tiles ---------- */
 function renderHeader() {
-  document.getElementById("title").textContent = `申万一级行业 · ${FY}E 盈利一致预期`;
+  document.getElementById("title").textContent = `${DATA.title} · ${FY}E 盈利一致预期`;
   const dates = W.map(w => `${w}前 ${DATA.windowDates[w] || "—"}`).join("，");
   document.getElementById("meta").innerHTML =
-    `<span>数据日期 ${esc(DATA.date)}</span><span>Wind 一致预期（180 天）</span><span>修正对比：${esc(dates)}</span>`;
+    `<span>数据日期 ${esc(DATA.date)}</span><span>Wind 一致预期（180 天）</span>${DATA.currency ? `<span>金额单位：亿${esc(DATA.currency)}</span>` : ""}<span>修正对比：${esc(dates)}</span>`;
   document.getElementById("growthTitle").textContent = `${FY}E 盈利增速`;
   document.getElementById("revTitle").textContent = `${FY}E 盈利预期修正`;
 
@@ -228,7 +233,7 @@ function renderHeader() {
   const rev = DATA.industries.map(d => d.rev[W[0]] && d.rev[W[0]].r).filter(v => v != null);
   const tiles = [
     { label: `全部有预测公司 · ${FY}E 增速`, value: fmtSignedPct(o.g),
-      sub: `${fmtNum(o.np0)} → ${fmtNum(o.np1)} 亿元（共同样本）` },
+      sub: `${fmtNum(o.np0)} → ${fmtNum(o.np1)} 亿${DATA.currency || "元"}（共同样本）` },
     { label: `全部有预测公司 · ${FY}E PE`, value: fmtX(o.pe),
       sub: `${fmtNum(o.nf)} / ${fmtNum(o.stocks)} 家有 ${FY} 预测` },
     { label: `${FY}E 预期修正 · ${W[0]}`, value: fmtSignedPct(o.rev[W[0]]),
