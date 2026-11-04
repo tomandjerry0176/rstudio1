@@ -16,6 +16,11 @@ FORECAST_YEAR = 2027
 # 预期修正回看窗口：标签 -> 向前偏移的交易日数（约 4 周 / 13 周）
 REVISION_WINDOWS = {"4周": 20, "13周": 65}
 TOP_N = 3
+# 提示标签阈值
+SMALL_SAMPLE = 10          # 有预测家数少于此值 -> 小样本
+TURNAROUND_SHARE = 0.5     # 基期亏损公司贡献的增量占比超过此值 -> 扭亏驱动
+SINGLE_NAME_SHARE = 0.35   # 单一公司贡献的增量占比超过此值 -> 单一公司主导
+CONCENTRATION = 0.6        # 前 TOP_N 公司利润占比超过此值 -> 集中度高
 OUT_DIR = Path("/Users/amber/Documents/本地数据库/财报")
 
 SW1 = {
@@ -123,6 +128,47 @@ def concentration_stats(d):
     }
 
 
+def increment_stats(d):
+    """共同样本内的增量来源：扭亏贡献、最大增量公司及剔除后增速。"""
+    np_base, np_forecast = np_col(BASE_YEAR), np_col(FORECAST_YEAR)
+    both = d.dropna(subset=[np_base, np_forecast])
+    delta = both[np_forecast] - both[np_base]
+    total_delta = delta.sum(min_count=1)
+    turnaround = delta[both[np_base] <= 0].sum()
+    out = {
+        f"{FORECAST_YEAR}E增量(亿,共同样本)": total_delta / 1e8,
+        "扭亏贡献占比": positive_denominator_ratio(turnaround, total_delta),
+        "最大增量公司": "",
+        "最大增量公司贡献占比": float("nan"),
+        "剔除最大增量公司后增速": float("nan"),
+    }
+    if len(delta):
+        code = delta.idxmax()
+        out["最大增量公司"] = both.at[code, "SEC_NAME"] if pd.notna(both.at[code, "SEC_NAME"]) else code
+        out["最大增量公司贡献占比"] = positive_denominator_ratio(delta[code], total_delta)
+        rest = both.drop(index=code)
+        out["剔除最大增量公司后增速"] = positive_denominator_ratio(
+            rest[np_forecast].sum(min_count=1), rest[np_base].sum(min_count=1)
+        ) - 1
+    return out
+
+
+def flag_text(row):
+    flags = []
+    if row[f"有{FORECAST_YEAR}预测家数"] < SMALL_SAMPLE:
+        flags.append("小样本")
+    base = row[f"{BASE_YEAR}E净利润(亿,共同样本)"]
+    if pd.notna(base) and base <= 0:
+        flags.append("基期亏损")
+    elif row["扭亏贡献占比"] > TURNAROUND_SHARE:
+        flags.append("扭亏驱动")
+    if row["最大增量公司贡献占比"] > SINGLE_NAME_SHARE:
+        flags.append("单一公司主导")
+    if row[f"前{TOP_N}公司{FORECAST_YEAR}E利润占比"] > CONCENTRATION:
+        flags.append("集中度高")
+    return "、".join(flags)
+
+
 def summarize(d, name):
     """无效比率留空；PE 的市值和利润严格使用同一组股票。"""
     np_base, np_forecast = np_col(BASE_YEAR), np_col(FORECAST_YEAR)
@@ -155,10 +201,44 @@ def summarize(d, name):
         ),
         f"平均机构数({FORECAST_YEAR}预测样本)": has_forecast[f"INST{FORECAST_YEAR}"].mean(),
     }
+    row.update(increment_stats(d))
     row.update(concentration_stats(d))
     for window in REVISION_WINDOWS:
         row.update(revision_stats(d, window))
+    row["提示"] = flag_text(row)
     return row
+
+
+def note_lines(revision_dates, date=None):
+    """统计说明文字；看板生成时也调用它，保证说明与当前口径一致。"""
+    date = date or DATE
+    window_text = "；".join(f"{win}前={dt}" for win, dt in revision_dates.items())
+    return [
+        f"请求数据日期：{date}；成分股实际返回日期见个股明细。",
+        "本表汇总有 Wind 一致预期覆盖的成分股，不代表全行业盈利。",
+        "两年净利润与增速使用两年均有预测的共同样本。",
+        "基期合计利润小于等于零时不展示常规增速；预测合计利润小于等于零时不展示PE。",
+        "PE使用预测利润与市值均非空的同一组股票，保留样本中的亏损公司。",
+        "覆盖率分母仅为已取得的成分股市值；存在市值缺失时不是完整行业市值覆盖率。",
+        "市值和利润按unit=1的元口径处理，利润除以1e8换算为亿元；正式使用前核对终端定义。",
+        "机构数沿用west_instnum及year参数，年度参数的适用性仍需在终端字段说明中核对。",
+        f"预期修正对比日期（交易日偏移）：{window_text}。",
+        f"预期修正 = 当前与对比日均有{FORECAST_YEAR}预测的同一批股票，预测利润合计之比减1；"
+        "当前或对比日合计小于等于零时比率留空，此时参考修正额（亿元）。",
+        "预期修正使用当前成分股回看历史预期，不重建历史成分股；新覆盖的公司不计入修正。",
+        "上调/下调家数按个股预测利润变化判断，相对变动小于百万分之一视为不变；"
+        "上调净占比=(上调-下调)/修正样本家数。",
+        f"前{TOP_N}公司占比 = 预测利润最大的{TOP_N}家之和 / 全部有预测公司合计；"
+        "合计小于等于零时留空，样本含亏损公司时可能超过100%。",
+        f"个股增速中位数仅统计基期预测利润大于零的公司，用于对照受大公司主导的合计增速。",
+        f"增量 = 共同样本{FORECAST_YEAR}E与{BASE_YEAR}E预测利润之差；扭亏贡献占比 = 基期预测利润"
+        "小于等于零的公司贡献的增量 / 行业总增量；总增量小于等于零时留空。",
+        "最大增量公司 = 共同样本中增量最大的一家；剔除后增速为去掉该公司后的共同样本增速。",
+        f"提示标签：有预测家数<{SMALL_SAMPLE}为小样本；基期合计亏损为基期亏损；扭亏贡献>"
+        f"{TURNAROUND_SHARE:.0%}为扭亏驱动；单一公司增量占比>{SINGLE_NAME_SHARE:.0%}为单一公司主导；"
+        f"前{TOP_N}公司利润占比>{CONCENTRATION:.0%}为集中度高。",
+        "Excel空白表示数据缺失或该指标不适用；市值全部为空时终止，不写入本次结果。",
+    ]
 
 
 def main():
@@ -220,27 +300,7 @@ def main():
     summary = pd.DataFrame(rows).sort_values(
         f"{FORECAST_YEAR}E增速(共同样本)", ascending=False, na_position="last"
     )
-    window_text = "；".join(f"{win}前={dt}" for win, dt in revision_dates.items())
-    notes = pd.DataFrame({"统计说明": [
-        f"请求数据日期：{DATE}；成分股实际返回日期见个股明细。",
-        "本表汇总有 Wind 一致预期覆盖的成分股，不代表全行业盈利。",
-        "两年净利润与增速使用两年均有预测的共同样本。",
-        "基期合计利润小于等于零时不展示常规增速；预测合计利润小于等于零时不展示PE。",
-        "PE使用预测利润与市值均非空的同一组股票，保留样本中的亏损公司。",
-        "覆盖率分母仅为已取得的成分股市值；存在市值缺失时不是完整行业市值覆盖率。",
-        "市值和利润按unit=1的元口径处理，利润除以1e8换算为亿元；正式使用前核对终端定义。",
-        "机构数沿用west_instnum及year参数，年度参数的适用性仍需在终端字段说明中核对。",
-        f"预期修正对比日期（交易日偏移）：{window_text}。",
-        f"预期修正 = 当前与对比日均有{FORECAST_YEAR}预测的同一批股票，预测利润合计之比减1；"
-        "当前或对比日合计小于等于零时比率留空，此时参考修正额（亿元）。",
-        "预期修正使用当前成分股回看历史预期，不重建历史成分股；新覆盖的公司不计入修正。",
-        "上调/下调家数按个股预测利润变化判断，相对变动小于百万分之一视为不变；"
-        "上调净占比=(上调-下调)/修正样本家数。",
-        f"前{TOP_N}公司占比 = 预测利润最大的{TOP_N}家之和 / 全部有预测公司合计；"
-        "合计小于等于零时留空，样本含亏损公司时可能超过100%。",
-        f"个股增速中位数仅统计基期预测利润大于零的公司，用于对照受大公司主导的合计增速。",
-        "Excel空白表示数据缺失或该指标不适用；市值全部为空时终止，不写入本次结果。",
-    ]})
+    notes = pd.DataFrame({"统计说明": note_lines(revision_dates)})
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out_file = OUT_DIR / f"申万一级_{FORECAST_YEAR}盈利预期_{DATE}.xlsx"
     with pd.ExcelWriter(out_file, engine="openpyxl") as xw:
@@ -250,13 +310,19 @@ def main():
         ws = xw.sheets["行业汇总"]
         ws.freeze_panes = "B2"
         ws.auto_filter.ref = ws.dimensions
-        percent_keys = ("覆盖率", "增速", "修正_", "占比")
+        percent_keys = ("覆盖率", "增速", "修正_", "占比", "贡献占比")
         for column, title in enumerate(summary.columns, start=1):
             if any(key in title for key in percent_keys):
                 for cells in ws.iter_rows(min_row=2, min_col=column, max_col=column):
                     cells[0].number_format = "0.00%"
     print(summary.round(3).to_string(index=False))
     print(f"已保存：{out_file}")
+
+    from build_dashboard import build
+    for html_file in (out_file.with_suffix(".html"),
+                      OUT_DIR / f"申万一级_{FORECAST_YEAR}盈利预期_latest.html"):
+        build(out_file, html_file)
+        print(f"看板已保存：{html_file}")
 
 
 if __name__ == "__main__":
