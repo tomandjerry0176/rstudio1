@@ -8,11 +8,15 @@
 先预检（核对一致预期的币种与财年标签、行业字段），确认后全量运行：
     python hk_consensus_2027.py --check
     python hk_consensus_2027.py
+默认只读打开财报库，用库内 fx_parity 不晚于 DATE 的最新中间价；加 --refresh-fx 才用 EDB 补汇率（写 fx_parity）。
+共享模块 sw1_consensus_2027.py 为新版（含 write_outputs）时输出交互看板与提示标签，旧版时退回静态 HTML 表格。
 
 日历化：一致预期只有整财年数，不能像历史报表那样用季报拼日历期，因此按月份加权：
   CY(Y) = m/12 × FY(Y) + (1 − m/12) × FY(Y+1)，m 为财年截止月；
   Wind 财年标签 N = 截止于 N 年 m 月的财年（与 hk_calendar.py 中“标签月 − 偏移”的归期一致，--check 会用已报财年验证）。
 """
+import argparse
+import html
 import sqlite3
 import sys
 from pathlib import Path
@@ -20,6 +24,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+# 申万汇总脚本保留在财报输出目录；财报库模块位于本脚本目录。
+CORE_DIR = Path("/Users/amber/Documents/本地数据库/财报")
+if str(CORE_DIR) not in sys.path:
+    sys.path.append(str(CORE_DIR))
 import sw1_consensus_2027 as core
 from sw1_consensus_2027 import check, normalize_wss, np_col
 
@@ -29,15 +37,15 @@ FORECAST_YEAR = 2027
 REVISION_WINDOWS = {"4周": 20, "13周": 65}
 OUT_DIR = Path("/Users/amber/Documents/本地数据库/财报")
 # 财报库代码目录（fin_common.py、hk_fx.py 所在处）；本脚本与它们放在同一目录时可不改
-FIN_DIR = Path("/Users/amber/Documents/本地数据库/财报")
+FIN_DIR = Path(__file__).resolve().parent
 
 # 股票池：恒生综合指数（约 500 只，覆盖港股约 95% 市值）
 UNIVERSE_INDEX = "HSCI.HI"
 
 # 行业分类：一次取数，按每种分类各出一套 Excel / 看板；字段取不到的分类跳过并提示
-# Wind 行业沿用 wind_fields.json 中 probe 选定的 wicsname2024；恒生行业字段需在 CG 核对（--check 会打印）
+# Wind 行业沿用 wind_fields.json 中 probe 选定的 wicsname2024；恒生行业级别参数为 category。
 CLASSIFICATIONS = {
-    "恒生一级": {"field": "industry_hs", "options": "tradeDate={date};industryType=1",
+    "恒生一级": {"field": "industry_hs", "options": "tradeDate={date};category=1",
                  "title": "港股 · 恒生一级行业"},
     "Wind二级": {"field": "wicsname2024", "options": "tradeDate={date};industryType=2",
                  "title": "港股 · Wind二级行业"},
@@ -47,6 +55,7 @@ CLASSIFICATIONS = {
 CONSENSUS_CCY = "report"
 NON_CAL_SHARE = 0.2      # 未能日历化的非 12 月财年利润占比超过此值 -> “财年错位”
 NO_FX_SHARE = 0.05       # 币种未识别公司市值占比超过此值 -> “币种缺失”
+STALE_FX_DAYS = 7        # 只读模式下库内最新汇率早于 DATE 超过此天数时警告
 CHECK_CODES = ["0700.HK", "0939.HK", "2318.HK", "0005.HK", "0992.HK", "9988.HK"]
 # EDB 人民币中间价代码 -> 币种（wind_fields.json 注释中列出的部分；其余显示代码）
 CCY_NAMES = {"HKD": "港元", "CNY": "人民币", "M0000185": "美元", "M0000186": "欧元",
@@ -76,12 +85,25 @@ def fx_codes(C):
         return FALLBACK_FX_CODES
 
 
-def ensure_fx_current(w, con, C, hk_fx, log=print):
-    """fx_parity 若未覆盖 DATE，则用 EDB 补到今天（与 fin_update_wind.py 同一张表、同样写法）。"""
-    hk_fx.ensure_tables(con)
+def fx_rate_date(con, hk_fx):
+    """实际使用的中间价日期：fx_parity 中不晚于 DATE 的最新日期。"""
+    return con.execute("SELECT MAX(date) FROM fx_parity WHERE code=? AND date<=?", (hk_fx.HKD_CODE, DATE)).fetchone()[0]
+
+
+def ensure_fx_current(w, con, C, hk_fx, refresh=False, log=print):
+    """返回实际使用的中间价日期。refresh=True 且库内未覆盖 DATE 时用 EDB 补齐（写 fx_parity，与 fin_update_wind.py 同表同法）；
+    默认只读，不写库，汇率偏旧时只警告。"""
+    if refresh:
+        hk_fx.ensure_tables(con)
     last = con.execute("SELECT MAX(date) FROM fx_parity WHERE code=?", (hk_fx.HKD_CODE,)).fetchone()[0]
-    if last and last >= DATE:
-        return
+    if not refresh or (last and last >= DATE):
+        used = fx_rate_date(con, hk_fx)
+        if used is None:
+            raise RuntimeError(f"fx_parity 中没有 {DATE} 及以前的港币中间价：请加 --refresh-fx 或先跑 fin_update_wind.py update")
+        lag = (pd.Timestamp(DATE) - pd.Timestamp(used)).days
+        if lag > STALE_FX_DAYS:
+            log(f"警告：库内最新中间价为 {used}，比 {DATE} 早 {lag} 天；需要时加 --refresh-fx")
+        return used
 
     def edb_series(code, start, end):
         d = w.edb(code, start, end, "Fill=Previous")
@@ -93,6 +115,7 @@ def ensure_fx_current(w, con, C, hk_fx, log=print):
         return out
 
     hk_fx.refresh_fx(con, edb_series, [hk_fx.HKD_CODE] + fx_codes(C), log)
+    return fx_rate_date(con, hk_fx)
 
 
 def fx_table(con, hk_fx, codes):
@@ -130,7 +153,9 @@ def fye_months(con, codes):
 def wss(w, codes, fields, options, what):
     err, frame = w.wss(codes, fields, options, usedf=True)
     check(err, what)
-    return normalize_wss(frame, what).reindex(codes)
+    frame = normalize_wss(frame, what).reindex(codes)
+    core.require_columns(frame, fields.upper().split(","), what)
+    return frame
 
 
 def fetch_years(w, codes, years, trade_date, label):
@@ -172,72 +197,186 @@ def hk_extra_stats(g):
     }
 
 
-def hk_notes(revision_dates, universe_size, cls_name):
+def hk_notes(revision_dates, universe_size, cls_name, rate_date):
     cls = CLASSIFICATIONS[cls_name]
-    lines = core.note_lines(revision_dates, DATE)
+    lines = [
+        f"请求数据日期：{DATE}；成分股实际返回日期见个股明细。",
+        "",  # 下方填入港股股票池与分类口径
+        "两年利润与增速使用共同样本；基期合计利润不为正时增速留空。",
+        "PE使用市值与预测利润均非空的同一批股票，保留亏损公司；预测合计利润不为正时PE留空。",
+        "覆盖率分母仅含已取得的市值；存在市值缺失时不是完整行业市值覆盖率。",
+        "机构数使用west_instnum；year参数是否适用于该字段仍需核对终端定义。",
+        "预期修正对比日期：" + "；".join(f"{win}前={dt}" for win, dt in revision_dates.items()) + "。",
+        "修正使用当前成分股、两个日期都有预测的共同样本和相同汇率；对比日合计利润不为正时留空。",
+        "上调净占比=(上调-下调)/修正样本家数；相对变动小于百万分之一视为不变。",
+        f"前{core.TOP_N}公司占比以全部有预测公司的利润合计为分母，含亏损公司时可能超过100%；分母不为正时留空。",
+        "个股增速中位数仅统计基期预测利润大于零的公司。",
+        "空白表示缺失或不适用，不以零填补。",
+    ]
     lines[1] = (f"股票池为{UNIVERSE_INDEX}成分股（{universe_size}只），按{cls_name}分类（字段 {cls['field']}）；"
                 "只汇总有 Wind 一致预期覆盖的公司，不代表全行业盈利。")
     lines.insert(2, ("一致预期按报表原币取数（WindPy currencyType 对港股无效），用财报库 hk_fx_profile 识别的报表币种、"
-                     f"按 {DATE} 人民币中间价交叉折算为港元；币种未识别且无历史系数的公司不计入。"
+                     f"按人民币中间价（{rate_date}）交叉折算为港元；币种未识别的公司不计入，"
+                     "无当前币种但有历史系数的沿用历史系数（个股明细“折算方式”为 approx）。"
                      if CONSENSUS_CCY == "report" else "一致预期经 --check 确认已由 Wind 折为港元，未再折算。")
                  + "金额单位亿港元；市值 mkt_cap_ard 为港元（A+H 公司为各类股份合计市值）。")
-    lines.insert(3, "非12月年结公司按财报库 hk_fye 识别的财年截止月 m 日历化：CY(Y) = m/12×FY(Y) + (1−m/12)×FY(Y+1)；"
+    lines.insert(3, f"基期财年已结束、Wind 不再保留一致预期的公司（如 3 月年结的 FY{BASE_YEAR}），用已报归母净利润（原币）"
+                    f"补足基期，个股明细“FY{BASE_YEAR}来源”列标注。"
+                    "非12月年结公司按财报库 hk_fye 识别的财年截止月 m 日历化：CY(Y) = m/12×FY(Y) + (1−m/12)×FY(Y+1)；"
                     "缺下一财年预测或截止月未知时退回财年口径，个股明细“口径”列逐只标注。"
                     "历史报表的日历对齐用季报/半年报拼接（hk_calendar.py），预测只有整财年数，故用加权近似。")
-    lines.insert(-1, f"港股另有提示：未能日历化的非12月财年利润占比>{NON_CAL_SHARE:.0%}为“财年错位”；"
-                     f"币种未识别公司市值占比>{NO_FX_SHARE:.0%}为“币种缺失”。")
+    if hasattr(core, "flag_text"):
+        lines.insert(-1, "增量 = 共同样本两年预测利润之差；扭亏贡献占比 = 基期亏损公司贡献的增量 / 行业总增量；"
+                         "最大增量公司为共同样本中增量最大的一家，剔除后增速为去掉该公司后的共同样本增速。")
+        lines.insert(-1, f"提示标签：有预测家数<{core.SMALL_SAMPLE}为小样本；基期合计亏损为基期亏损；"
+                         f"扭亏贡献>{core.TURNAROUND_SHARE:.0%}为扭亏驱动；单一公司增量占比>{core.SINGLE_NAME_SHARE:.0%}"
+                         f"为单一公司主导；前{core.TOP_N}公司利润占比>{core.CONCENTRATION:.0%}为集中度高；"
+                         f"未能日历化的非12月财年利润占比>{NON_CAL_SHARE:.0%}为财年错位；"
+                         f"币种未识别公司市值占比>{NO_FX_SHARE:.0%}为币种缺失。")
+    else:
+        lines.insert(-1, f"港股提示标签：未能日历化的非12月财年利润占比>{NON_CAL_SHARE:.0%}为“财年错位”；"
+                         f"币种未识别公司市值占比>{NO_FX_SHARE:.0%}为“币种缺失”。")
     return lines
+
+
+def write_outputs(rows, details, notes, stem, title):
+    """优先用共享模块的 write_outputs（Excel + 交互看板）；共享模块为旧版时退回本地静态导出。"""
+    if hasattr(core, "write_outputs"):
+        return core.write_outputs(rows, details, notes, stem, title)
+    print("提示：sw1_consensus_2027.py 为旧版（无 write_outputs），输出静态 HTML；"
+          "更新 sw1_consensus_2027.py / build_dashboard.py / dashboard_template.html 后可得交互看板", flush=True)
+    return write_static(rows, details, notes, stem, title)
+
+
+def write_static(rows, details, notes, stem, title):
+    summary = pd.DataFrame(rows).sort_values(
+        f"{FORECAST_YEAR}E增速(共同样本)", ascending=False, na_position="last")
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    path = OUT_DIR / f"{stem}_{DATE}"
+    with pd.ExcelWriter(path.with_suffix(".xlsx"), engine="openpyxl") as writer:
+        summary.to_excel(writer, sheet_name="行业汇总", index=False)
+        pd.concat(details).rename_axis("股票代码").to_excel(writer, sheet_name="个股明细")
+        pd.DataFrame({"统计说明": notes}).to_excel(writer, sheet_name="统计说明", index=False)
+        ws = writer.sheets["行业汇总"]
+        ws.freeze_panes = "B2"
+        ws.auto_filter.ref = ws.dimensions
+        for column, name in enumerate(summary.columns, 1):
+            if any(key in name for key in ("覆盖率", "增速", "修正_", "占比")):
+                for cells in ws.iter_rows(min_row=2, min_col=column, max_col=column):
+                    cells[0].number_format = "0.00%"
+    shown = summary.copy()
+    for name in shown.columns:
+        if pd.api.types.is_numeric_dtype(shown[name]):
+            percent = any(key in name for key in ("覆盖率", "增速", "修正_", "占比"))
+            shown[name] = shown[name].map(
+                lambda value: "" if pd.isna(value) else (f"{value:.2%}" if percent else f"{value:,.2f}"))
+    page = ("<!doctype html><html lang='zh-CN'><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            f"<title>{html.escape(title)}</title><style>"
+            "body{font-family:system-ui,sans-serif;margin:24px;color:#172b4d}"
+            "table{border-collapse:collapse;white-space:nowrap}td,th{padding:8px;border:1px solid #ddd}"
+            "th{background:#eef3f8}li{margin:8px 0}</style>"
+            f"<h1>{html.escape(title)} · {FORECAST_YEAR}盈利预期</h1><p>数据日期：{DATE}；金额单位：亿港元</p>"
+            "<div style='overflow:auto'>" + shown.to_html(index=False, escape=True) + "</div><h2>统计说明</h2><ul>"
+            + "".join(f"<li>{html.escape(note)}</li>" for note in notes) + "</ul></html>")
+    path.with_suffix(".html").write_text(page, encoding="utf-8")
+    print(f"已保存：{path.with_suffix('.xlsx')} / {path.with_suffix('.html')}", flush=True)
 
 
 # ---------------------------------------------------------------- 预检
 def run_check(w, con, hk_fx):
     print(f"== 股票池 {UNIVERSE_INDEX}")
     err, cons = w.wset("indexconstituent", f"date={DATE};windcode={UNIVERSE_INDEX}", usedf=True)
-    print(f"ErrorCode={err}，成分股 {0 if err else len(cons)} 只（恒生综合指数应约 500 只）")
-    codes = [] if err else cons["wind_code"].astype(str).str.upper().tolist()
+    check(err, f"{UNIVERSE_INDEX} 成分股预检")
+    cons.columns = cons.columns.astype(str).str.lower()
+    core.require_columns(cons, ["wind_code"], "成分股预检")
+    codes = cons["wind_code"].dropna().astype(str).str.strip().str.upper().drop_duplicates().tolist()
+    if not codes:
+        raise RuntimeError("成分股预检为空")
+    print(f"ErrorCode={err}，成分股 {len(codes)} 只")
 
     for name, cfg in CLASSIFICATIONS.items():
         print(f"\n== 行业分类：{name}（{cfg['field']}）")
         e, frame = w.wss(CHECK_CODES, cfg["field"], cfg["options"].format(date=DATE.replace("-", "")), usedf=True)
         print(frame.to_string() if e == 0 else f"ErrorCode={e}：字段不可用，正式运行会跳过该分类")
+        if e == 0 and frame.isna().all().all():
+            print("警告：字段全部为空，未通过分类预检")
 
     prof = pd.read_sql("SELECT wind_code, fx_code FROM hk_fx_profile", con).set_index("wind_code")["fx_code"]
-    fye = fye_months(con, codes or list(prof.index))
-    last = BASE_YEAR - 1
-
-    def ratio_test(sample, west_year, rpt_year, what):
-        if not sample:
-            print(f"   {what}：样本为空")
-            return None
-        est = wss(w, sample, "west_netprofit", f"year={west_year};tradeDate={DATE};westPeriod=180;unit=1", what)
-        act = wss(w, sample, "np_belongto_parcomsh", f"unit=1;rptDate={rpt_year}1231;rptType=1", what)
-        r = (pd.to_numeric(est.iloc[:, 0], errors="coerce") / pd.to_numeric(act.iloc[:, 0], errors="coerce"))
-        r = r[(r > 0) & np.isfinite(r)]
-        return r
-
-    print(f"\n== 一致预期币种：FY{last} 一致预期 / FY{last} 已报归母净利润（原币），12 月财年公司")
+    fye = fye_months(con, codes)
     fx = hk_fx.FX(con)
-    dec = [c for c in (codes or list(prof.index)) if fye.get(c) == 12]
-    for code, label in (("CNY", "人民币报表"), ("M0000185", "美元报表"), ("HKD", "港元报表")):
-        sample = [c for c in dec if prof.get(c) == code][:30]
-        r = ratio_test(sample, last, last, label)
-        if r is None or r.empty:
-            continue
-        g = fx.factor(code, 1, 0, DATE)
-        print(f"   {label}：{len(r)} 家，比值中位数 {r.median():.3f}（若 Wind 已折港元，应约 {g:.3f}）")
-    print("   -> 人民币/美元报表的比值都接近 1.000：一致预期为报表原币，保持 CONSENSUS_CCY = 'report'；"
-          "\n      接近括号里的汇率：Wind 已折港元，改 CONSENSUS_CCY = 'HKD'。")
+    prev = BASE_YEAR - 1
 
-    print(f"\n== 财年标签：3 月年结公司 FY{BASE_YEAR} 一致预期 vs 已报年报（标签 {BASE_YEAR}-12-31 = 截至 {BASE_YEAR} 年 3 月）")
-    mar = [c for c in (codes or list(fye.index)) if fye.get(c) == 3][:20]
-    r_same = ratio_test(mar, BASE_YEAR, BASE_YEAR, "同标签")
-    r_prev = ratio_test(mar, BASE_YEAR, BASE_YEAR - 1, "错一年")
-    if r_same is not None and not r_same.empty and r_prev is not None and not r_prev.empty:
-        dev = lambda r: float(np.median(np.abs(np.log(r))))  # noqa: E731
-        a, b = dev(r_same), dev(r_prev)
-        verdict = ("两者接近，无法区分（样本公司两年利润变化太小），请把结果发给我" if abs(a - b) < 0.005
-                   else "约定一致，可直接日历化" if a < b else "标签错了一年，请把结果发给我")
-        print(f"   同标签偏差 {a:.3f}，错一年偏差 {b:.3f}（{len(r_same)} 家） -> {verdict}")
+    def west(sample, year):
+        e = wss(w, sample, "west_netprofit", f"year={year};tradeDate={DATE};westPeriod=180;unit=1", f"FY{year} 预期")
+        return pd.to_numeric(e["WEST_NETPROFIT"], errors="coerce")
+
+    def actual(sample, label_year):
+        a = wss(w, sample, "np_belongto_parcomsh", f"unit=1;rptDate={label_year}1231;rptType=1", f"{label_year} 年报")
+        return pd.to_numeric(a["NP_BELONGTO_PARCOMSH"], errors="coerce")
+
+    # 已报年份的一致预期 Wind 不再保留（上一轮 FY{prev} 预期/已报配对全空即此原因），改用下一年预期对比已报
+    print(f"\n== 一致预期币种：FY{BASE_YEAR} 一致预期 / FY{prev} 已报归母净利润（原币），12 月财年、两年均为正")
+    print("   原币口径下比值 ≈ 1+增速；若 Wind 已折港元，比值 ≈ 交叉汇率×(1+增速)。美元报表最好分辨（汇率约 7.8）。")
+    dec = [c for c in codes if fye.get(c) == 12]
+    medians = {}
+    for code, label in (("M0000185", "美元报表"), ("CNY", "人民币报表"), ("HKD", "港元报表")):
+        sample = [c for c in dec if prof.get(c) == code][:40]
+        if not sample:
+            print(f"   {label}：样本为空")
+            continue
+        e, a = west(sample, BASE_YEAR), actual(sample, prev)
+        ok = (e > 0) & (a > 0)
+        r = (e / a)[ok]
+        g = fx.factor(code, 1, 0, DATE)
+        line = f"   {label}：取样 {len(sample)}，预期非空 {int(e.notna().sum())}，已报非空 {int(a.notna().sum())}，有效 {len(r)}"
+        if len(r):
+            line += f"，比值中位数 {r.median():.3f}（交叉汇率 {g:.3f}）" if g else f"，比值中位数 {r.median():.3f}（汇率缺失）"
+        print(line)
+        if len(r) >= 5 and g:
+            medians[code] = (float(r.median()), g)
+    verdict = None
+    if "M0000185" in medians:
+        m, g = medians["M0000185"]
+        verdict = "report" if m < g / 2.5 else "HKD" if m > g / 2 else None
+    elif "CNY" in medians and "HKD" in medians:
+        rel = medians["CNY"][0] / medians["HKD"][0]
+        print(f"   人民币组 / 港元组比值 {rel:.3f}（原币口径约 1，港元口径约 {medians['CNY'][1]:.3f}，受两组增速差影响，仅供参考）")
+    if verdict:
+        same = verdict == CONSENSUS_CCY
+        print(f"   -> 结论：一致预期为{'报表原币' if verdict == 'report' else '港元'}；"
+              + ("与当前 CONSENSUS_CCY 一致。" if same else f"与当前 CONSENSUS_CCY='{CONSENSUS_CCY}' 不一致，应改为 '{verdict}'。"))
+    else:
+        print("   警告：美元报表有效样本不足，币种口径未能自动判定，请把本段输出发给我。")
+
+    print("\n== 财年标签：一致预期的年份覆盖（已报年份应无预期）")
+    mar = [c for c in codes if fye.get(c) == 3][:40]
+    years = (prev, BASE_YEAR, FORECAST_YEAR)
+    cover = {}
+    for label, sample in (("12月财年", dec[:60]), ("3月财年", mar)):
+        if not sample:
+            print(f"   {label}：样本为空")
+            continue
+        cover[label] = {y: float(west(sample, y).notna().mean()) for y in years}
+        print(f"   {label}（{len(sample)} 家）：" + "，".join(f"FY{y} {v:.0%}" for y, v in cover[label].items()))
+    cd, cm = cover.get("12月财年"), cover.get("3月财年")
+    if cd and cm:
+        if cd[prev] > 0.2:
+            print(f"   无法判定：12 月财年 FY{prev} 已报仍有预期覆盖，“已报年份无预期”的前提不成立，请把本段输出发给我。")
+        elif cm[BASE_YEAR] < 0.2 and cm[FORECAST_YEAR] > 0.5:
+            print(f"   -> 约定一致：3 月财年 FY{BASE_YEAR}（截至 {BASE_YEAR} 年 3 月，已于年中报出）无预期，"
+                  f"FY{FORECAST_YEAR} 有预期；标签 N = 截至 N 年 3 月，可直接日历化。")
+        elif cm[BASE_YEAR] > 0.5:
+            print(f"   -> 标签错一年：3 月财年 FY{BASE_YEAR} 仍有预期，说明标签 N 指截至 N+1 年 3 月的财年；"
+                  "日历化公式需改为后移一年，请把本段输出发给我。")
+        else:
+            print("   无法判定：覆盖率处于中间区域，请把本段输出发给我。")
+    sample = [c for c in ("9988.HK", "0992.HK") if c in codes]
+    if sample:
+        print("   样例（原币）：")
+        table = pd.DataFrame({f"FY{y}": west(sample, y) for y in range(prev, FORECAST_YEAR + 2)})
+        table.insert(0, "财年截止月", fye.reindex(sample))
+        print(table.to_string())
 
     print(f"\n== FY{FORECAST_YEAR + 1} 预期覆盖（日历化需要）")
     nxt = wss(w, CHECK_CODES, "west_netprofit", f"year={FORECAST_YEAR + 1};tradeDate={DATE};westPeriod=180;unit=1", "FY+1")
@@ -250,7 +389,13 @@ def run_check(w, con, hk_fx):
 
 
 # ---------------------------------------------------------------- 主流程
-def main(check_only=False):
+def open_db(C, readonly):
+    if readonly:
+        return sqlite3.connect(Path(C.DB_PATH).resolve().as_uri() + "?mode=ro", uri=True)
+    return sqlite3.connect(C.DB_PATH)
+
+
+def main(check_only=False, refresh_fx=False):
     from WindPy import w
 
     C, hk_fx = load_fin_modules()
@@ -260,18 +405,19 @@ def main(check_only=False):
     check(w.start().ErrorCode, "Wind 启动")
     if not w.isconnected():
         raise RuntimeError("Wind 未连接，请先登录终端")
-    con = sqlite3.connect(C.DB_PATH)
+    con = open_db(C, readonly=not refresh_fx)
     try:
-        ensure_fx_current(w, con, C, hk_fx)
+        rate_date = ensure_fx_current(w, con, C, hk_fx, refresh=refresh_fx)
+        print(f"财报库：{C.DB_PATH}（{'可写，已检查汇率' if refresh_fx else '只读'}）；中间价日期 {rate_date}", flush=True)
         if check_only:
             run_check(w, con, hk_fx)
             return
-        run(w, con, hk_fx)
+        run(w, con, hk_fx, rate_date)
     finally:
         con.close()
 
 
-def run(w, con, hk_fx):
+def run(w, con, hk_fx, rate_date):
     revision_dates = {win: core.offset_trade_date(w, days) for win, days in REVISION_WINDOWS.items()}
     print(f"预期修正对比日期：{revision_dates}", flush=True)
 
@@ -314,6 +460,24 @@ def run(w, con, hk_fx):
         d[f"FY{year}原币"] = raw[year][0]
     d[f"INST{BASE_YEAR}"] = raw[BASE_YEAR][1]
     d[f"INST{FORECAST_YEAR}"] = raw[FORECAST_YEAR][1]
+    # 基期财年已结束（如 3 月年结的 FY2026 截至 2026-03、已报出）时 Wind 不再保留一致预期，用已报归母净利润（原币）补；
+    # 标签 rptDate=BASE_YEAR-12-31 即该财年全年累计（hk_calendar.py 的归期约定）
+    base_fy = raw[BASE_YEAR][0]
+    fy_end = pd.Series([pd.Timestamp(BASE_YEAR, int(m), 1) + pd.offsets.MonthEnd(0) if m == m else pd.NaT
+                        for m in d["财年截止月"]], index=d.index)
+    need = base_fy.isna() & (fy_end < pd.Timestamp(DATE))
+    if need.any():
+        act = wss(w, list(need[need].index), "np_belongto_parcomsh",
+                  f"unit=1;rptDate={BASE_YEAR}1231;rptType=1", f"FY{BASE_YEAR} 已报")
+        act = pd.to_numeric(act["NP_BELONGTO_PARCOMSH"], errors="coerce").reindex(d.index)
+        filled = need & act.notna()
+        base_fy = base_fy.where(~filled, act)
+        print(f"FY{BASE_YEAR} 已结束的非 12 月财年公司 {int(need.sum())} 只，用已报利润补基期 {int(filled.sum())} 只", flush=True)
+    else:
+        filled = pd.Series(False, index=d.index)
+    d[f"FY{BASE_YEAR}原币"] = base_fy
+    d[f"FY{BASE_YEAR}来源"] = np.where(filled, "已报", np.where(base_fy.notna(), "一致预期", ""))
+    raw[BASE_YEAR] = (base_fy, raw[BASE_YEAR][1])
     hkd = {y: raw[y][0] * factor for y in fy_years}   # 无系数 -> NaN，自然不计入
     d[np_col(BASE_YEAR)], _ = calendarize(hkd[BASE_YEAR], hkd[FORECAST_YEAR], d["财年截止月"])
     d[np_col(FORECAST_YEAR)], d["口径"] = calendarize(hkd[FORECAST_YEAR], hkd[FORECAST_YEAR + 1], d["财年截止月"])
@@ -332,7 +496,8 @@ def run(w, con, hk_fx):
             print(f"跳过 {cls_name}：字段 {cls['field']} 返回 ErrorCode={err}", flush=True)
             continue
         ind = normalize_wss(ind, cls_name).reindex(codes).iloc[:, 0]
-        labels = ind.astype("string").str.strip().replace("", pd.NA)
+        # 恒生行业返回值带“(HS)”后缀，如“资讯科技业(HS)”，去掉便于阅读
+        labels = ind.astype("string").str.strip().str.replace(r"\s*\(HS\)$", "", regex=True).replace("", pd.NA)
         if labels.isna().all():
             print(f"跳过 {cls_name}：字段 {cls['field']} 全部为空", flush=True)
             continue
@@ -344,10 +509,10 @@ def run(w, con, hk_fx):
             row.update(hk_extra_stats(g))
             extra = [flag for flag, hit in (("财年错位", row["未日历化利润占比(非12月财年)"] > NON_CAL_SHARE),
                                            ("币种缺失", row["币种未识别市值占比"] > NO_FX_SHARE)) if hit]
-            row["提示"] = "、".join(x for x in [row["提示"], *extra] if x)
+            row["提示"] = "、".join(x for x in [row.get("提示", ""), *extra] if x)
             rows.append(row)
         print(f"{cls_name}：{len(rows)} 个行业（未分类 {int(labels.isna().sum())} 只）", flush=True)
-        core.write_outputs(rows, [dc], hk_notes(revision_dates, len(codes), cls_name),
+        write_outputs(rows, [dc], hk_notes(revision_dates, len(codes), cls_name, rate_date),
                            f"港股_{cls_name}_{FORECAST_YEAR}盈利预期", cls["title"])
         done += 1
     if not done:
@@ -355,4 +520,8 @@ def run(w, con, hk_fx):
 
 
 if __name__ == "__main__":
-    main(check_only="--check" in sys.argv[1:])
+    ap = argparse.ArgumentParser(description="港股分行业一致预期盈利汇总")
+    ap.add_argument("--check", action="store_true", help="只做预检：行业字段、一致预期币种、财年标签、财报库覆盖")
+    ap.add_argument("--refresh-fx", action="store_true", help="库内中间价未覆盖 DATE 时用 EDB 补齐（会写 fx_parity）")
+    args = ap.parse_args()
+    main(check_only=args.check, refresh_fx=args.refresh_fx)
