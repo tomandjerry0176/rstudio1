@@ -86,12 +86,16 @@ def revision_stats(d, window):
     """同一批股票当前与 window 前的 FORECAST_YEAR 预测利润对比。"""
     now, past = np_col(FORECAST_YEAR), np_col(FORECAST_YEAR, window)
     s = d.dropna(subset=[now, past])
-    change = positive_denominator_ratio(s[now].sum(min_count=1), s[past].sum(min_count=1))
+    now_sum, past_sum = s[now].sum(min_count=1), s[past].sum(min_count=1)
+    # 当前或对比日合计利润小于等于零时，比率没有意义（如房地产由微利转亏会得到 -2000%），只看修正额
+    change = (positive_denominator_ratio(now_sum, past_sum)
+              if pd.notna(now_sum) and now_sum > 0 else float("nan"))
     same = np.isclose(s[now], s[past], rtol=1e-6, atol=0)
     up = int(((s[now] > s[past]) & ~same).sum())
     down = int(((s[now] < s[past]) & ~same).sum())
     return {
         f"{FORECAST_YEAR}E修正_{window}(配对样本)": change - 1,
+        f"{FORECAST_YEAR}E修正额_{window}(亿)": (now_sum - past_sum) / 1e8,
         f"修正样本家数_{window}": len(s),
         f"上调家数_{window}": up,
         f"下调家数_{window}": down,
@@ -228,7 +232,7 @@ def main():
         "机构数沿用west_instnum及year参数，年度参数的适用性仍需在终端字段说明中核对。",
         f"预期修正对比日期（交易日偏移）：{window_text}。",
         f"预期修正 = 当前与对比日均有{FORECAST_YEAR}预测的同一批股票，预测利润合计之比减1；"
-        "对比日合计小于等于零时留空。",
+        "当前或对比日合计小于等于零时比率留空，此时参考修正额（亿元）。",
         "预期修正使用当前成分股回看历史预期，不重建历史成分股；新覆盖的公司不计入修正。",
         "上调/下调家数按个股预测利润变化判断，相对变动小于百万分之一视为不变；"
         "上调净占比=(上调-下调)/修正样本家数。",
