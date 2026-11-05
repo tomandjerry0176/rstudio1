@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>指数盈利预期</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11,11,11,0.10);
+  --wash: rgba(11,11,11,0.04);
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --caution: #b8b7af;
+  --up: #2a78d6;
+  --down: #e34948;
+  --chip: #f0efec;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #f0efec;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255,255,255,0.10);
+    --wash: rgba(255,255,255,0.05);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --caution: #5d5c57;
+    --up: #3987e5;
+    --down: #e66767;
+    --chip: #2c2c2a;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --ink: #f0efec;
+  --ink-2: #c3c2b7;
+  --muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255,255,255,0.10);
+  --wash: rgba(255,255,255,0.05);
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --caution: #5d5c57;
+  --up: #3987e5;
+  --down: #e66767;
+  --chip: #2c2c2a;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--page);
+  color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+.wrap { max-width: 1280px; margin: 0 auto; padding: 24px 16px 48px; }
+header h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+.meta { color: var(--ink-2); font-size: 13px; margin: 0; }
+.meta span + span::before { content: "·"; margin: 0 6px; color: var(--muted); }
+
+.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 20px 0; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.tile .label { color: var(--ink-2); font-size: 13px; }
+.tile .value { font-size: 28px; font-weight: 600; margin: 2px 0; letter-spacing: -0.01em; }
+.tile .sub { color: var(--muted); font-size: 12px; }
+
+.charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; min-width: 0; }
+.panel-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.panel h2 { font-size: 15px; font-weight: 600; margin: 0; }
+.panel .hint { color: var(--muted); font-size: 12px; margin: 2px 0 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--ink-2); font-size: 12px; margin: 4px 0 6px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.legend i.dot { border-radius: 50%; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; padding: 2px; }
+.seg button {
+  border: 0; background: transparent; color: var(--ink-2); font: inherit; font-size: 12px;
+  padding: 3px 10px; border-radius: 6px; cursor: pointer;
+}
+.seg button.active { background: var(--chip); color: var(--ink); font-weight: 600; }
+svg { display: block; width: 100%; overflow: visible; }
+svg text { fill: var(--ink-2); font-size: 12px; }
+svg .tick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+svg .val { fill: var(--ink-2); font-size: 11px; font-variant-numeric: tabular-nums; }
+svg .hit { fill: transparent; cursor: pointer; }
+svg .hit:hover { fill: var(--wash); }
+
+.table-panel { margin-top: 12px; }
+.table-wrap { overflow-x: auto; margin-top: 8px; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: 13px; }
+th, td { padding: 7px 8px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--grid); }
+th:first-child, td:first-child, th.l, td.l { text-align: left; }
+thead th { color: var(--ink-2); font-weight: 500; font-size: 12px; cursor: pointer; user-select: none; position: sticky; top: 0; background: var(--surface); }
+thead th:hover { color: var(--ink); }
+thead th.sorted { color: var(--ink); font-weight: 600; }
+tbody tr.row { cursor: pointer; }
+tbody tr.row:hover, tbody tr.row.open { background: var(--wash); }
+td.name { font-weight: 600; }
+td.name .caret { display: inline-block; width: 12px; color: var(--muted); font-weight: 400; }
+td.na { color: var(--muted); }
+.chip { display: inline-block; font-size: 11px; line-height: 18px; padding: 0 6px; border-radius: 9px; background: var(--chip); color: var(--ink-2); margin-right: 4px; }
+tr.detail > td { background: var(--wash); padding: 12px 14px 16px; text-align: left; white-space: normal; }
+.detail-facts { color: var(--ink-2); margin: 0 0 8px; }
+.detail-facts b { color: var(--ink); font-weight: 600; }
+.detail table { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.detail th { position: static; cursor: default; }
+
+details.notes { margin-top: 12px; color: var(--ink-2); font-size: 12px; }
+details.notes summary { cursor: pointer; color: var(--ink); font-size: 13px; }
+details.notes ol { padding-left: 20px; margin: 8px 0 0; }
+
+#tip {
+  position: fixed; pointer-events: none; z-index: 10; display: none; max-width: 280px;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+}
+#tip b { display: block; font-size: 13px; margin-bottom: 4px; }
+#tip .r { display: flex; justify-content: space-between; gap: 16px; color: var(--ink-2); }
+#tip .r span:last-child { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+@media (max-width: 900px) {
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .charts { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 420px) {
+  .tile .value { font-size: 22px; }
+}
+</style>
+<style>
+.idx-table tbody tr { cursor: pointer; }
+.idx-table tbody tr.sel { background: var(--wash); }
+.idx-table tbody tr.sel td:first-child { box-shadow: inset 3px 0 0 var(--series-1); }
+.idx-table tr.group td { background: transparent; color: var(--muted); font-size: 12px; font-weight: 600; cursor: default; padding-top: 14px; }
+.idx-table td.name { font-weight: 600; }
+.idx-table .code { color: var(--muted); font-size: 12px; font-weight: 400; margin-left: 4px; }
+.charts.idx { grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); margin-top: 12px; }
+.stock-table td.l .ind { color: var(--muted); font-size: 12px; margin-left: 4px; }
+.sub-facts { color: var(--ink-2); font-size: 13px; margin: 2px 0 8px; }
+.sub-facts b { color: var(--ink); }
+@media (max-width: 900px) { .charts.idx { grid-template-columns: minmax(0, 1fr); } }
+</style></head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 id="title"></h1>
+    <p class="meta" id="meta"></p>
+  </header>
+
+  <section class="panel table-panel" style="margin-top:20px">
+    <div class="panel-head">
+      <div>
+        <h2 id="tableTitle"></h2>
+        <p class="hint">自下而上：成分股一致预期按指数权重汇总；点击指数查看行业与个股贡献</p>
+      </div>
+    </div>
+    <div class="table-wrap"><table class="idx-table" id="idxTable"></table></div>
+  </section>
+
+  <section class="charts idx">
+    <article class="panel">
+      <div class="panel-head">
+        <div>
+          <h2 id="indTitle"></h2>
+          <p class="hint" id="indHint"></p>
+        </div>
+        <div class="seg" id="modeSwitch"></div>
+      </div>
+      <p class="sub-facts" id="indFacts"></p>
+      <div class="legend">
+        <span><i style="background:var(--up)"></i>正贡献</span>
+        <span><i style="background:var(--down)"></i>负贡献</span>
+      </div>
+      <div id="indChart"></div>
+    </article>
+    <article class="panel">
+      <div class="panel-head">
+        <div>
+          <h2 id="stockTitle"></h2>
+          <p class="hint">按对指数增速贡献的绝对值排序</p>
+        </div>
+      </div>
+      <div class="table-wrap"><table class="stock-table" id="stockTable"></table></div>
+    </article>
+  </section>
+
+  <details class="notes panel" style="margin-top:12px">
+    <summary>统计说明</summary>
+    <ol id="notes"></ol>
+  </details>
+</div>
+<div id="tip" role="tooltip"></div>
+
+<script>
+const DATA = /*__DATA__*/null;
+if (!DATA) {
+  document.querySelector(".wrap").innerHTML = `<section class="panel" style="margin-top:24px"><h2>这是指数看板模板，本身不含数据</h2>
+    <p class="hint" style="font-size:14px;line-height:1.8">请打开 index_consensus.py 生成的 指数_2027盈利预期_latest.html。</p></section>`;
+  throw new Error("index_dashboard_template.html 是模板");
+}
+const FY = DATA.forecastYear, BY = DATA.baseYear, W = DATA.windows;
+let sel = DATA.indices[0].name, mode = "growth";
+
+const zeroSafe = (v, d) => Math.abs(v * 100) < 0.5 * Math.pow(10, -d) ? 0 : v;
+const pct = (v, d = 1) => v == null ? "—" : (zeroSafe(v, d) * 100).toFixed(d) + "%";
+const spct = (v, d = 1) => { if (v == null) return "—"; const z = zeroSafe(v, d); return (z > 0 ? "+" : "") + (z * 100).toFixed(d) + "%"; };
+const pp = (v, d = 2) => v == null ? "—" : (Math.abs(v) < 0.5 * Math.pow(10, -d) ? 0 : v).toFixed(d).replace(/^(?=\d)/, v > 0 ? "+" : "");
+const xf = v => v == null ? "—" : v.toFixed(1) + "x";
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function renderHeader() {
+  document.getElementById("title").textContent = `A股 / 港股指数 · ${FY}E 盈利一致预期`;
+  const dates = W.map(w => `${w}前 ${DATA.windowDates[w] || "—"}`).join("，");
+  document.getElementById("meta").innerHTML =
+    `<span>数据日期 ${esc(DATA.date)}</span><span>Wind 一致预期 · 指数权重法</span><span>修正对比：${esc(dates)}</span>`;
+  document.getElementById("tableTitle").textContent = `指数 ${FY}E 盈利增速、估值与预期修正`;
+}
+
+function renderTable() {
+  const head = ["指数", `${FY}E 增速`, "合计法", "核心增速", `${FY}E PE`, ...W.map(w => `修正 ${w}`), "权重覆盖", "共同样本"];
+  let body = "", market = null;
+  for (const d of DATA.indices) {
+    if (d.market !== market) {
+      market = d.market;
+      body += `<tr class="group"><td colspan="${head.length}">${esc(market)}</td></tr>`;
+    }
+    body += `<tr class="${d.name === sel ? "sel" : ""}" data-name="${esc(d.name)}">
+      <td class="l name">${esc(d.name)}${d.code && d.code !== "—" ? `<span class="code">${esc(d.code)}</span>` : ""}</td>
+      <td><b>${spct(d.g)}</b></td><td>${spct(d.gsum)}</td><td>${spct(d.gcore)}</td><td>${xf(d.pe)}</td>
+      ${W.map(w => `<td>${d.rev[w] == null ? "—" : (d.rev[w] > 0 ? "▲ " : d.rev[w] < 0 ? "▼ " : "") + spct(d.rev[w])}</td>`).join("")}
+      <td>${pct(d.cov, 0)}</td><td>${d.nboth} / ${d.n}</td></tr>`;
+  }
+  const t = document.getElementById("idxTable");
+  t.innerHTML = `<thead><tr>${head.map((h, i) => `<th class="${i ? "" : "l"}" style="cursor:default">${esc(h)}</th>`).join("")}</tr></thead><tbody>${body}</tbody>`;
+  t.querySelectorAll("tbody tr[data-name]").forEach(tr => tr.onclick = () => { sel = tr.dataset.name; renderAll(); });
+}
+
+function renderSwitch() {
+  const modes = [["growth", "增速贡献"], ...W.map(w => ["rev_" + w, `修正贡献 ${w}`])];
+  const box = document.getElementById("modeSwitch");
+  box.innerHTML = modes.map(([k, l]) => `<button type="button" data-k="${k}" class="${k === mode ? "active" : ""}">${esc(l)}</button>`).join("");
+  box.onclick = e => { const b = e.target.closest("button"); if (!b) return; mode = b.dataset.k; renderSwitch(); renderInd(); };
+}
+
+const ROW = 22, BAR = 12, LABEL_W = 84, TOP = 22, RIGHT = 52;
+function niceTicks(min, max, count = 4) {
+  const span = max - min || 1, mag = Math.pow(10, Math.floor(Math.log10(span / count)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => span / s <= count) || 10 * mag;
+  const out = [];
+  for (let v = Math.ceil(min / step) * step; v <= max + 1e-9; v += step) out.push(+v.toFixed(10));
+  return out;
+}
+function barPath(x0, x1, y, h) {
+  if (Math.abs(x1 - x0) < 0.5) return "";
+  const r = Math.min(4, Math.abs(x1 - x0) / 2, h / 2), s = x1 >= x0 ? 1 : -1;
+  return `M${x0},${y}H${x1 - s * r}Q${x1},${y} ${x1},${y + r}V${y + h - r}Q${x1},${y + h} ${x1 - s * r},${y + h}H${x0}Z`;
+}
+
+function renderInd() {
+  const d = DATA.indices.find(x => x.name === sel);
+  const isRev = mode.startsWith("rev_"), win = isRev ? mode.slice(4) : null;
+  const val = r => isRev ? r.rc[win] : r.c;
+  const total = isRev ? d.rev[win] : d.g;
+  document.getElementById("indTitle").textContent = `${d.name} · 行业贡献（百分点）`;
+  document.getElementById("indHint").textContent = isRev
+    ? `${FY}E 预期 ${win} 修正按行业拆分，合计等于指数修正 ${spct(total)}`
+    : `${FY}E 盈利增速按行业拆分，合计等于指数增速 ${spct(total)}`;
+  document.getElementById("indFacts").innerHTML =
+    `指数 ${FY}E 增速 <b>${spct(d.g)}</b>，核心增速 <b>${spct(d.gcore)}</b>，${FY}E PE <b>${xf(d.pe)}</b>，权重覆盖 ${pct(d.cov, 0)}（${esc(d.wmode)}）`;
+  const rows = [...d.inds].sort((a, b) => (val(b) ?? -1e9) - (val(a) ?? -1e9));
+  const el = document.getElementById("indChart"), width = Math.max(280, el.clientWidth);
+  const vals = rows.map(val).filter(v => v != null);
+  const m = Math.max(0.1, ...vals.map(Math.abs));
+  const lo0 = Math.min(0, ...vals), hi0 = Math.max(0, ...vals);
+  const ticks = niceTicks(lo0 < 0 ? lo0 : 0, hi0 > 0 ? hi0 : m);
+  const lo = Math.min(lo0, ticks[0]), hi = Math.max(hi0, ticks[ticks.length - 1]);
+  const x = v => LABEL_W + (v - lo) / (hi - lo || 1) * (width - LABEL_W - RIGHT);
+  const height = TOP + rows.length * ROW + 4;
+  let s = "";
+  for (const t of ticks) {
+    s += `<line x1="${x(t)}" x2="${x(t)}" y1="${TOP - 4}" y2="${height}" stroke="${t === 0 ? "var(--axis)" : "var(--grid)"}"/>`;
+    s += `<text class="tick" x="${x(t)}" y="${TOP - 8}" text-anchor="middle">${t > 0 ? "+" : ""}${t}</text>`;
+  }
+  rows.forEach((r, i) => {
+    const y = TOP + i * ROW, v = val(r);
+    s += `<text x="${LABEL_W - 8}" y="${y + ROW / 2 + 4}" text-anchor="end">${esc(r.name)}</text>`;
+    if (v != null) {
+      s += `<path d="${barPath(x(0), x(v), y + (ROW - BAR) / 2, BAR)}" fill="${v >= 0 ? "var(--up)" : "var(--down)"}"/>`;
+      if (i < 3 || i >= rows.length - 2) s += `<text class="val" x="${v >= 0 ? x(v) + 4 : x(v) - 4}" y="${y + ROW / 2 + 4}" text-anchor="${v >= 0 ? "start" : "end"}">${pp(v)}</text>`;
+    }
+    s += `<rect class="hit" data-i="${i}" x="0" y="${y}" width="${width}" height="${ROW}"/>`;
+  });
+  el.innerHTML = `<svg viewBox="0 0 ${width} ${height}" height="${height}" role="img" aria-label="${esc(d.name)} 行业贡献">${s}</svg>`;
+  const tip = document.getElementById("tip");
+  el.onmousemove = e => {
+    const t = e.target.closest(".hit"); if (!t) { tip.style.display = "none"; return; }
+    const r = rows[+t.dataset.i];
+    const lines = [["增速贡献", pp(r.c) + " pp"], [`${FY}E 增速`, spct(r.g)], ["权重（样本内）", pct(r.w)], ["家数", r.n],
+      ...W.map(w => [`修正贡献 ${w}`, pp(r.rc[w]) + " pp"])];
+    tip.innerHTML = `<b>${esc(r.name)}</b>` + lines.map(([k, v]) => `<div class="r"><span>${esc(k)}</span><span>${esc(v)}</span></div>`).join("");
+    tip.style.display = "block";
+    const w = tip.offsetWidth, h = tip.offsetHeight;
+    let left = e.clientX + 14, top = e.clientY + 14;
+    if (left + w > innerWidth - 8) left = e.clientX - w - 14;
+    if (top + h > innerHeight - 8) top = e.clientY - h - 14;
+    tip.style.left = Math.max(8, left) + "px"; tip.style.top = Math.max(8, top) + "px";
+  };
+  el.onmouseleave = () => { tip.style.display = "none"; };
+}
+
+function renderStocks() {
+  const d = DATA.indices.find(x => x.name === sel);
+  document.getElementById("stockTitle").textContent = `${d.name} · 个股贡献 前 ${d.stocks.length}`;
+  const head = ["公司", "权重", `${FY}E 增速`, "贡献(pp)", ...W.map(w => `修正 ${w}`)];
+  const body = d.stocks.map(s => `<tr><td class="l">${esc(s.name)}<span class="ind">${esc(s.ind)}</span>
+      ${s.loss ? '<span class="chip">扭亏</span>' : ""}${s.oneoff ? '<span class="chip">基期偏高</span>' : ""}</td>
+      <td>${pct(s.w, 2)}</td><td>${s.loss ? "扭亏" : spct(s.g)}</td><td><b>${pp(s.c)}</b></td>
+      ${W.map(w => `<td>${spct(s.rev[w])}</td>`).join("")}</tr>`).join("");
+  document.getElementById("stockTable").innerHTML =
+    `<thead><tr>${head.map((h, i) => `<th class="${i ? "" : "l"}" style="cursor:default">${esc(h)}</th>`).join("")}</tr></thead><tbody>${body}</tbody>`;
+}
+
+function renderAll() { renderTable(); renderInd(); renderStocks(); }
+renderHeader(); renderSwitch(); renderAll();
+document.getElementById("notes").innerHTML = DATA.notes.map(n => `<li>${esc(n)}</li>`).join("");
+let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(renderInd, 120); });
+</script>
+</body>
+</html>
