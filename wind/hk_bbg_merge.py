@@ -7,7 +7,9 @@
   full：全部改用 BBG 一致预期（市值、行业、币种折算后的已报基期沿用 Wind 明细），另出 Wind 与 BBG 逐行业对照
 输出与港股脚本同格式（行业汇总 / 个股明细 / 统计说明 + 看板），可直接作为 index_consensus.py 的 --h 输入。
 
-BBG 相对财年 → 日历年：按 BEST_PERIOD_END_DT 把 1FY/2FY/3FY 归到截止年份 Y、截止月 m，
+BBG 相对财年 → 日历年：1FY 的截止日 = 财年截止月 m（Wind 明细“财年截止月”，缺失时用 BBG EQY_FISCAL_YR_END，再缺按 12 月）
+  下、截止日 + 3 个月晚于数据日期的第一个财年（即尚未报出的第一个财年）；若模板含 END_1FY 列且有值则优先使用。
+  1FY/2FY/3FY 归到截止年份 Y 后，
   CY(Y) = m/12 × V(Y) + (1 − m/12) × V(Y+1)；V(Y) 缺 BBG 时（已报财年）用 Wind 明细中的已报值（已折港元）。
 历史对比日：若某财年（截止于当前 1FY 前一年）在对比日之后约 3 个月内才报出，则对比日的 1FY/2FY 相当于当前的
   前一财年/1FY，需错开一位（主要影响 6 月年结公司）；按截止日 + 3 个月近似判断，统计说明中注明。
@@ -56,10 +58,30 @@ def to_calendar(values_by_year, month, year):
     return month / 12 * a + (1 - month / 12) * b if pd.notna(a) and pd.notna(b) else np.nan
 
 
+def fye_month(v):
+    """BBG EQY_FISCAL_YR_END（'03/31'、'3/31'、日期等）→ 月份。"""
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return np.nan
+    if hasattr(v, "month"):
+        return float(v.month)
+    m = re.match(r"\s*(\d{1,2})[/-]", str(v))
+    return float(m.group(1)) if m and 1 <= int(m.group(1)) <= 12 else np.nan
+
+
+def first_unreported_end(month, date):
+    """截止月为 month 的财年中，截止日 + REPORT_LAG_MONTHS 晚于 date 的第一个财年的截止日。"""
+    end = pd.Timestamp(date.year - 2, int(month), 1) + pd.offsets.MonthEnd(0)
+    while end + pd.DateOffset(months=REPORT_LAG_MONTHS) <= date:
+        end = pd.Timestamp(end.year + 1, int(month), 1) + pd.offsets.MonthEnd(0)
+    return end
+
+
 def bbg_calendar(wind, raw, num, dt, windows, date, by, fy):
     """返回 DataFrame：BBG_NP{by}、BBG_NP{fy}、BBG_NP{fy}_{w}前、BBG财年截止月、BBG口径。金额为港元（元）。"""
     out = pd.DataFrame(index=wind.index)
-    ends = {k: dt(f"END_{k}").reindex(wind.index) for k in ("1FY", "2FY", "3FY")}
+    end_given = dt("END_1FY").reindex(wind.index)
+    bbg_fye = (raw["FYE(BBG)"].map(fye_month) if "FYE(BBG)" in raw else pd.Series(np.nan, index=raw.index)).reindex(wind.index)
+    months = wind["财年截止月"].where(wind["财年截止月"].notna(), bbg_fye).fillna(12) if "财年截止月" in wind else bbg_fye.fillna(12)
     cur = {k: num(f"NI_{k}").reindex(wind.index) * MILLION for k in ("1FY", "2FY", "3FY")}
     past = {w: {k: num(f"NI_{k}_{w}前").reindex(wind.index) * MILLION for k in ("1FY", "2FY", "3FY")}
             for w in windows}
@@ -71,10 +93,12 @@ def bbg_calendar(wind, raw, num, dt, windows, date, by, fy):
 
     rows = []
     for c in wind.index:
-        e1 = ends["1FY"].get(c)
-        if pd.isna(e1):
+        if pd.isna(cur["1FY"].get(c)) and pd.isna(cur["2FY"].get(c)):
             rows.append({})
             continue
+        e1 = end_given.get(c)
+        if pd.isna(e1):
+            e1 = first_unreported_end(months[c], date)
         m, y1 = e1.month, e1.year
         vals = {y1: cur["1FY"][c], y1 + 1: cur["2FY"][c], y1 + 2: cur["3FY"][c]}
         if pd.notna(reported.get(c)) and (y1 - 1) not in vals:

@@ -6,8 +6,8 @@
 
 取数（全部 EQY_FUND_CRNCY=HKD，金额单位为百万港元，BBG 默认）：
   BEST_NET_INCOME      1FY / 2FY / 3FY（当前）            BDP
-  BEST_PERIOD_END_DT   1FY / 2FY / 3FY（财年截止日）      BDP
-  BEST_NET_INCOME      1FY / 2FY / 3FY（1/2/3 个月前）    BDH，起止日期同一天
+  EQY_FISCAL_YR_END    公司财年截止日（如 03/31），仅作交叉核对；1FY 的截止年份由合并脚本按财年截止月推算
+  BEST_NET_INCOME      1FY / 2FY / 3FY（1/2/3 个月前）    BDH，起止日期同一天，Days=A、Fill=P 取当日或之前最近值
 """
 import argparse
 import re
@@ -52,13 +52,14 @@ def build(wind_xlsx, out):
         "港股 BBG 一致预期取数模板（恒生综合全部成分股，Excel 公式版）",
         "",
         "1. 在装有 Bloomberg Excel 插件的电脑上打开，Bloomberg 选项卡 → Refresh Workbook，等待所有 Requesting Data 消失。",
-        "   581 只 × 15 个公式，约需几分钟；如提示数据量上限，可分批选中区域刷新（Refresh Selection）。",
+        "   581 只 × 14 个公式，约需几分钟；如提示数据量上限，可分批选中区域刷新（Refresh Selection）。",
         "2. 保存后发回（Excel 会缓存公式结果，无需粘贴为值），用 hk_bbg_merge.py 合并到港股流程。",
         "",
         "字段（#N/A Invalid Field 时在终端 FLDS 核对，改「BBG取数」第 3 行的字段名与对应公式）：",
         "BEST_NET_INCOME：BEst 一致预期净利润（BBG 标准口径，部分公司为经调整），单位百万，已用 EQY_FUND_CRNCY=HKD 换成港元",
-        "BEST_PERIOD_END_DT：该财年截止日，用于把相对财年（1FY/2FY）对齐到日历年",
-        "BDH 历史值：起止日为「参数」表中的对比日期（与 Wind 修正对比日期一致），选项 Dts=H 只返回数值",
+        "EQY_FISCAL_YR_END：公司财年截止日，仅作核对；1FY 对应哪一年由合并脚本按财年截止月 + 3 个月报出期推算",
+        "BDH 历史值：起止日为「参数」表中的对比日期（与 Wind 修正对比日期一致）；Days=A、Fill=P 取当日或之前最近值，",
+        "  Dts=H 只返回数值。若单元格显示的是日期而非数值，说明 Dts=H 未生效，请告知。",
         "",
         "检查：#N/A N.A. = BBG 无该财年预测，属正常；整列 #N/A 多为字段名或覆盖参数问题。",
     ], start=1):
@@ -86,8 +87,7 @@ def build(wind_xlsx, out):
     cols = [("Wind代码", None, None), ("BBG代码", None, None), ("名称(Wind)", None, None), ("名称(BBG)", "NAME", None)]
     for fy in ("1FY", "2FY", "3FY"):
         cols.append((f"NI_{fy}", "BEST_NET_INCOME", fy))
-    for fy in ("1FY", "2FY", "3FY"):
-        cols.append((f"END_{fy}", "BEST_PERIOD_END_DT", fy))
+    cols.append(("FYE(BBG)", "EQY_FISCAL_YR_END", None))
     for i, (w, _) in enumerate(rows):
         for fy in ("1FY", "2FY", "3FY"):
             cols.append((f"NI_{fy}_{w}前", "BEST_NET_INCOME", (fy, i + 2)))
@@ -110,18 +110,16 @@ def build(wind_xlsx, out):
         for j, (name, fld, opt) in enumerate(cols, start=1):
             if j <= 3:
                 continue
-            if fld == "NAME":
-                f = f'=BDP({t},"NAME")'
+            if fld in ("NAME", "EQY_FISCAL_YR_END"):
+                f = f'=BDP({t},"{fld}")'
             elif isinstance(opt, tuple):
                 fy, prow = opt
                 dc = f"{get_column_letter(j)}$2"
                 f = (f'=BDH({t},"{fld}",{dc},{dc},"BEST_FPERIOD_OVERRIDE","{fy}",'
-                     f'"EQY_FUND_CRNCY","HKD","Dts=H")')
+                     f'"EQY_FUND_CRNCY","HKD","Days=A","Fill=P","Dts=H")')
             else:
                 f = f'=BDP({t},"{fld}","BEST_FPERIOD_OVERRIDE","{opt}","EQY_FUND_CRNCY","HKD")'
-            cell = k.cell(row=r, column=j, value=f)
-            if name.startswith("END_"):
-                cell.number_format = "yyyy-mm-dd"
+            k.cell(row=r, column=j, value=f)
     k.freeze_panes = f"D{FIRST}"
     for j in range(1, len(cols) + 1):
         k.column_dimensions[get_column_letter(j)].width = 14
