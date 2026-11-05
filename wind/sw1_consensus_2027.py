@@ -13,8 +13,8 @@ import pandas as pd
 DATE = "2026-11-03"
 BASE_YEAR = 2026
 FORECAST_YEAR = 2027
-# 预期修正回看窗口：标签 -> 向前偏移的交易日数（约 4 周 / 13 周）
-REVISION_WINDOWS = {"4周": 20, "13周": 65}
+# 预期修正回看窗口：标签 -> 向前偏移的交易日数（每月按约 21 个交易日）
+REVISION_WINDOWS = {"1个月": 21, "2个月": 42, "3个月": 63}
 TOP_N = 3
 # 提示标签阈值
 SMALL_SAMPLE = 10          # 有预测家数少于此值 -> 小样本

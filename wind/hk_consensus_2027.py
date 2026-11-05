@@ -34,7 +34,7 @@ from sw1_consensus_2027 import check, normalize_wss, np_col
 DATE = "2026-11-03"
 BASE_YEAR = 2026
 FORECAST_YEAR = 2027
-REVISION_WINDOWS = {"4周": 20, "13周": 65}
+REVISION_WINDOWS = {"1个月": 21, "2个月": 42, "3个月": 63}
 OUT_DIR = Path("/Users/amber/Documents/本地数据库/财报")
 # 财报库代码目录（fin_common.py、hk_fx.py 所在处）；本脚本与它们放在同一目录时可不改
 FIN_DIR = Path(__file__).resolve().parent
