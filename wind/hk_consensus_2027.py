@@ -68,8 +68,8 @@ MANUAL_FYE = {}
 
 # H 股没有 Wind 一致预期时，用对应 A 股的一致预期补（只补 H 股为空的年份；代码需在 Wind 终端核对）
 #   "same"：A+H 为同一家公司，利润相同，直接使用 A 股预测（人民币）
-#   "scale"：不同上市主体（中国联通红筹公司 0762.HK 与 A 股控股公司 600050.SH），
-#            按最近完整年度（BASE_YEAR-1）已报归母净利润之比换算：H 预测 = A 预测 × H 已报 / A 已报
+#   "scale"：不同上市主体，按最近完整年度（BASE_YEAR-1）已报归母净利润之比换算：H 预测 = A 预测 × H 已报 / A 已报
+#            （中国联通 0762.HK 曾用此法对应 600050.SH；2026-11-05 起改用 BBG 一致预期，由 hk_bbg_merge.py 补）
 A_PROXY = {
     "1919.HK": ("601919.SH", "same"),    # 中远海控
     "3986.HK": ("603986.SH", "same"),    # 兆易创新
@@ -83,7 +83,6 @@ A_PROXY = {
     "1157.HK": ("000157.SZ", "same"),    # 中联重科
     "0317.HK": ("600685.SH", "same"),    # 中船防务
     "1513.HK": ("000513.SZ", "same"),    # 丽珠医药（A 股：丽珠集团）
-    "0762.HK": ("600050.SH", "scale"),   # 中国联通：红筹公司 vs A 股控股公司
 }
 
 # 基期一次性因素：个股基期（FY{BASE}）利润明显高于下一财年时标注
@@ -330,9 +329,10 @@ def hk_notes(revision_dates, universe_size, cls_name, rate_date):
                      "无当前币种但有历史系数的沿用历史系数（个股明细“折算方式”为 approx）。"
                      if CONSENSUS_CCY == "report" else "一致预期经 --check 确认已由 Wind 折为港元，未再折算。")
                  + "金额单位亿港元；市值 mkt_cap_ard 为港元（A+H 公司为各类股份合计市值）。")
-    lines.insert(3, "H 股无 Wind 一致预期时用对应 A 股一致预期补（个股明细“预测来源”列标注）：A+H 同一公司直接使用；"
-                    f"中国联通红筹（0762.HK）与 A 股（600050.SH）为不同主体，按 {BASE_YEAR - 1} 年已报归母净利润之比换算。"
-                    "预期修正对 A 股代理同样处理。")
+    scaled = [h for h, (a, mode) in A_PROXY.items() if mode == "scale"]
+    lines.insert(3, "H 股无 Wind 一致预期时，A+H 同一公司直接用 A 股一致预期补（个股明细“预测来源”列标注），预期修正同样处理"
+                    + (f"；{'、'.join(scaled)} 与其 A 股为不同主体，按 {BASE_YEAR - 1} 年已报归母净利润之比换算" if scaled else "")
+                    + "。其余无预测公司可用 hk_bbg_merge.py 以 BBG 一致预期补缺。")
     lines.insert(4, f"基期财年已结束、Wind 不再保留一致预期的公司（如 3 月年结的 FY{BASE_YEAR}），用已报归母净利润（原币）"
                     f"补足基期，个股明细“FY{BASE_YEAR}来源”列标注。"
                     "非12月年结公司按财报库 hk_fye 识别的财年截止月 m 日历化：CY(Y) = m/12×FY(Y) + (1−m/12)×FY(Y+1)；"

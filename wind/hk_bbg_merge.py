@@ -20,10 +20,18 @@ import argparse
 import re
 from pathlib import Path
 
+import sys
+
 import numpy as np
 import pandas as pd
 
-import sw1_consensus_2027 as core
+# 与 hk_consensus_2027.py 放在同一目录（financials_lib）运行；共享模块 sw1_consensus_2027.py 在财报输出目录
+CORE_DIR = Path("/Users/amber/Documents/本地数据库/财报")
+try:
+    import sw1_consensus_2027 as core
+except ImportError:
+    sys.path.append(str(CORE_DIR))
+    import sw1_consensus_2027 as core
 
 MILLION = 1e6
 REPORT_LAG_MONTHS = 3
