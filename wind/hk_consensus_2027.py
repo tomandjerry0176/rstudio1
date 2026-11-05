@@ -56,6 +56,20 @@ CONSENSUS_CCY = "report"
 NON_CAL_SHARE = 0.2      # 未能日历化的非 12 月财年利润占比超过此值 -> “财年错位”
 NO_FX_SHARE = 0.05       # 币种未识别公司市值占比超过此值 -> “币种缺失”
 STALE_FX_DAYS = 7        # 只读模式下库内最新汇率早于 DATE 超过此天数时警告
+
+# 手动指定报表币种：财报库尚无币种识别的新上市公司（优先级高于 hk_fx_profile）。值为 (EDB 中间价代码, 方向)，
+# 代码可用 "HKD"、"CNY" 或 wind_fields.json 中的 M00001xx；方向 1 = 中间价为“1 外币 = x 人民币”。
+# 财报库补齐后（fin_update_wind.py hk-estimate / update）可删掉对应条目。
+MANUAL_FX = {
+    "0625.HK": ("M0000185", 1),   # 希音：美元报表（2026-11-05 用户指定）
+}
+# 手动指定财年截止月（hk_fye 无记录的公司）；不填则按财年口径直接使用
+MANUAL_FYE = {}
+
+# 基期一次性因素：个股基期（FY{BASE}）利润明显高于下一财年时标注
+ONE_OFF_DROP = 0.30           # 基期为一致预期：下一年较基期下降超过 30%
+ONE_OFF_DROP_REPORTED = 0.05  # 基期为已报利润：下一年预期低于已报超过 5%（已报含一次性损益，预期通常不含）
+ONE_OFF_SHARE = 0.10          # 被标注公司基期利润占行业基期利润超过此值 -> 行业提示“基期含一次性”
 CHECK_CODES = ["0700.HK", "0939.HK", "2318.HK", "0005.HK", "0992.HK", "9988.HK"]
 # EDB 人民币中间价代码 -> 币种（wind_fields.json 注释中列出的部分；其余显示代码）
 CCY_NAMES = {"HKD": "港元", "CNY": "人民币", "M0000185": "美元", "M0000186": "欧元",
@@ -128,6 +142,10 @@ def fx_table(con, hk_fx, codes):
         p = prof.get(c)
         if CONSENSUS_CCY == "HKD":
             rows.append((c, "HKD(Wind已折算)", 1.0, "consensus_hkd"))
+        elif c in MANUAL_FX:
+            code, direction = MANUAL_FX[c]
+            f = fx.factor(code, direction, 0, DATE)
+            rows.append((c, CCY_NAMES.get(code, code) + "(手动指定)", f, "manual" if f else None))
         elif p and p[0]:
             f = fx.factor(p[0], p[1], 0, DATE)
             name = CCY_NAMES.get(p[0], p[0]) + ("" if p[1] == 1 or p[0] in ("HKD", "CNY") else "(反向报价)")
@@ -145,8 +163,12 @@ def fye_months(con, codes):
         got = {r[0]: (r[1], r[2]) for r in con.execute("SELECT wind_code, fye_month, cal FROM hk_fye")}
     except sqlite3.OperationalError:
         got = {}
-    return pd.Series([float(got[c][0]) if c in got and got[c][1] else (12.0 if c in got else np.nan)
-                      for c in codes], index=codes)
+    out = pd.Series([float(got[c][0]) if c in got and got[c][1] else (12.0 if c in got else np.nan)
+                     for c in codes], index=codes)
+    for c, m in MANUAL_FYE.items():
+        if c in out.index:
+            out[c] = float(m)
+    return out
 
 
 # ---------------------------------------------------------------- 取数与日历化
@@ -181,8 +203,29 @@ def calendarize(fy, fy_next, month):
     return value, basis
 
 
+def base_one_off(d):
+    """个股基期提示：基期财年利润（原币）明显高于下一财年，可能含一次性收益。"""
+    base, nxt = d[f"FY{BASE_YEAR}原币"], d[f"FY{FORECAST_YEAR}原币"]
+    reported = d[f"FY{BASE_YEAR}来源"].eq("已报")
+    keep = np.where(reported, 1 - ONE_OFF_DROP_REPORTED, 1 - ONE_OFF_DROP)
+    hit = (base > 0) & nxt.notna() & (nxt < base * keep)
+    return pd.Series(np.select([hit & reported, hit], ["已报基期高于下年预期", "基期预期偏高"], default=""),
+                     index=d.index)
+
+
 def hk_extra_stats(g):
     f = np_col(FORECAST_YEAR)
+    b = np_col(BASE_YEAR)
+    both = g.dropna(subset=[b, f])
+    flagged = both["基期提示"].ne("")
+    rest = both[~flagged]
+    top = both[flagged].sort_values(b, ascending=False)
+    one_off = {
+        "基期偏高公司": "、".join(top["SEC_NAME"].fillna(pd.Series(top.index, index=top.index)).astype(str)),
+        "基期偏高利润占比": core.positive_denominator_ratio(both.loc[flagged, b].sum(), both[b].sum(min_count=1)),
+        "剔除基期偏高公司后增速": (core.positive_denominator_ratio(rest[f].sum(min_count=1), rest[b].sum(min_count=1)) - 1
+                                  if flagged.any() else float("nan")),
+    }
     has = g.dropna(subset=[f])
     non_dec = has["财年截止月"].ne(12) & has["财年截止月"].notna()
     not_cal = non_dec & has["口径"].ne("日历化")
@@ -194,6 +237,7 @@ def hk_extra_stats(g):
         "币种未识别家数": int(no_fx.sum()),
         "币种未识别市值占比": core.positive_denominator_ratio(g.loc[no_fx, "MKT_CAP_ARD"].sum(),
                                                               g["MKT_CAP_ARD"].sum(min_count=1)),
+        **one_off,
     }
 
 
@@ -232,10 +276,21 @@ def hk_notes(revision_dates, universe_size, cls_name, rate_date):
                          f"扭亏贡献>{core.TURNAROUND_SHARE:.0%}为扭亏驱动；单一公司增量占比>{core.SINGLE_NAME_SHARE:.0%}"
                          f"为单一公司主导；前{core.TOP_N}公司利润占比>{core.CONCENTRATION:.0%}为集中度高；"
                          f"未能日历化的非12月财年利润占比>{NON_CAL_SHARE:.0%}为财年错位；"
-                         f"币种未识别公司市值占比>{NO_FX_SHARE:.0%}为币种缺失。")
+                         f"币种未识别公司市值占比>{NO_FX_SHARE:.0%}为币种缺失；"
+                         f"基期偏高公司的基期利润占行业>{ONE_OFF_SHARE:.0%}为基期含一次性。")
     else:
         lines.insert(-1, f"港股提示标签：未能日历化的非12月财年利润占比>{NON_CAL_SHARE:.0%}为“财年错位”；"
-                         f"币种未识别公司市值占比>{NO_FX_SHARE:.0%}为“币种缺失”。")
+                         f"币种未识别公司市值占比>{NO_FX_SHARE:.0%}为“币种缺失”；"
+                         f"基期偏高公司的基期利润占行业>{ONE_OFF_SHARE:.0%}为“基期含一次性”。")
+    lines.insert(-1, f"基期偏高（个股明细“基期提示”）：基期为一致预期且 FY{FORECAST_YEAR} 预期较 FY{BASE_YEAR} 下降超过"
+                     f"{ONE_OFF_DROP:.0%}，或基期为已报利润且 FY{FORECAST_YEAR} 预期低于已报超过{ONE_OFF_DROP_REPORTED:.0%}"
+                     "（已报含一次性损益、预期通常不含），可能含出售资产、投资收益等一次性因素；按原币财年数判断，只作提示、不剔除。"
+                     "行业汇总给出基期偏高公司、其基期利润占比和剔除后增速。")
+    if MANUAL_FX or MANUAL_FYE:
+        lines.insert(-1, "手动指定："
+                         + "；".join([f"{c} 报表币种 {CCY_NAMES.get(v[0], v[0])}" for c, v in MANUAL_FX.items()]
+                                    + [f"{c} 财年截止月 {m}" for c, m in MANUAL_FYE.items()])
+                         + "（财报库尚无识别，个股明细“折算方式”为 manual）。")
     return lines
 
 
@@ -486,6 +541,7 @@ def run(w, con, hk_fx, rate_date):
         # 修正只看预期本身的变化：两个日期用同一个（当前）汇率
         d[np_col(FORECAST_YEAR, window)], _ = calendarize(past[FORECAST_YEAR][0] * factor,
                                                           past[FORECAST_YEAR + 1][0] * factor, d["财年截止月"])
+    d["基期提示"] = base_one_off(d)
     d["请求数据日期"] = DATE
     d["成分股返回日期"] = constituent_dates
 
@@ -508,7 +564,8 @@ def run(w, con, hk_fx, rate_date):
             row = core.summarize(g, name)
             row.update(hk_extra_stats(g))
             extra = [flag for flag, hit in (("财年错位", row["未日历化利润占比(非12月财年)"] > NON_CAL_SHARE),
-                                           ("币种缺失", row["币种未识别市值占比"] > NO_FX_SHARE)) if hit]
+                                           ("币种缺失", row["币种未识别市值占比"] > NO_FX_SHARE),
+                                           ("基期含一次性", row["基期偏高利润占比"] > ONE_OFF_SHARE)) if hit]
             row["提示"] = "、".join(x for x in [row.get("提示", ""), *extra] if x)
             rows.append(row)
         print(f"{cls_name}：{len(rows)} 个行业（未分类 {int(labels.isna().sum())} 只）", flush=True)

@@ -129,6 +129,9 @@ def industry_record(row, g, windows):
         for w in windows
     }
     rec["stocks"] = stock_rows(g, windows)
+    if "剔除基期偏高公司后增速" in row:   # 港股：基期一次性因素
+        rec["oneoff"] = {"names": clean(row["基期偏高公司"]), "share": clean(row["基期偏高利润占比"]),
+                         "g": clean(row["剔除基期偏高公司后增速"])}
     return rec
 
 
@@ -139,9 +142,17 @@ def build_payload(xlsx, title):
     details = details.set_index("股票代码")
     windows = configure_core(details)
 
+    summary = sheets.get("行业汇总")
+    extra_cols = ["基期偏高公司", "基期偏高利润占比", "剔除基期偏高公司后增速", "提示"]
+    hk_extra = (summary.set_index("行业")[[c for c in extra_cols if c in summary.columns]]
+                if summary is not None and "剔除基期偏高公司后增速" in summary.columns else None)
     industries = []
     for name, g in details.groupby("行业", sort=False):
-        industries.append(industry_record(core.summarize(g, name), g, windows))
+        row = core.summarize(g, name)
+        if hk_extra is not None and name in hk_extra.index:
+            # 港股特有指标与提示（财年错位、币种缺失、基期含一次性）取自 Excel 行业汇总
+            row.update({k: v for k, v in hk_extra.loc[name].items() if not (k == "提示" and pd.isna(v))})
+        industries.append(industry_record(row, g, windows))
 
     notes = sheets.get("统计说明")
     note_lines = notes.iloc[:, 0].dropna().astype(str).tolist() if notes is not None else []

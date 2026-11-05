@@ -161,7 +161,7 @@ details.notes ol { padding-left: 20px; margin: 8px 0 0; }
       </div>
       <div class="legend">
         <span><i style="background:var(--series-1)"></i>行业合计增速</span>
-        <span><i style="background:var(--caution)"></i>受扭亏 / 小样本影响，谨慎比较</span>
+        <span><i style="background:var(--caution)"></i>受扭亏 / 小样本 / 一次性因素影响，谨慎比较</span>
         <span><i class="dot" style="background:var(--series-2)"></i>个股增速中位数</span>
       </div>
       <div id="growthChart"></div>
@@ -206,7 +206,7 @@ let revWindow = W[0];
 let sortKey = "g", sortDir = -1;
 const openRows = new Set();
 
-const CAUTION_FLAGS = ["扭亏驱动", "基期亏损", "小样本"];
+const CAUTION_FLAGS = ["扭亏驱动", "基期亏损", "小样本", "基期含一次性"];
 const isCaution = d => d.flags.some(f => CAUTION_FLAGS.includes(f));
 
 const zeroSafe = (v, digits) => Math.abs(v * 100) < 0.5 * Math.pow(10, -digits) ? 0 : v;
@@ -445,6 +445,7 @@ function detailHtml(d, span) {
   const facts = [
     d.maxco ? `增量最大：<b>${esc(d.maxco)}</b>，贡献 <b>${fmtPct(d.maxshare, 0)}</b>，剔除后增速 <b>${fmtSignedPct(d.gex)}</b>` : "",
     `扭亏贡献 <b>${fmtPct(d.turn, 0)}</b>`,
+    d.oneoff && d.oneoff.names ? `基期偏高：<b>${esc(d.oneoff.names)}</b>（基期利润占 ${fmtPct(d.oneoff.share, 0)}），剔除后增速 <b>${fmtSignedPct(d.oneoff.g)}</b>` : "",
     `前${DATA.topN}大：${esc(d.top3names || "—")}（${fmtPct(d.top3, 0)}）`,
     `平均覆盖机构 ${d.inst == null ? "—" : d.inst.toFixed(1)} 家`,
   ].filter(Boolean).join("；");
