@@ -8,7 +8,8 @@
 输出与港股脚本同格式（行业汇总 / 个股明细 / 统计说明 + 看板），可直接作为 index_consensus.py 的 --h 输入。
 
 BBG 相对财年 → 日历年：1FY 的截止日 = 财年截止月 m（Wind 明细“财年截止月”，缺失时用 BBG EQY_FISCAL_YR_END，再缺按 12 月）
-  下、截止日 + 3 个月晚于数据日期的第一个财年（即尚未报出的第一个财年）；若模板含 END_1FY 列且有值则优先使用。
+  下、截止日 + 3 个月晚于数据日期的第一个财年（即尚未报出的第一个财年）；模板 END_1FY 列（BEST_PERIOD_END_DATE，1FY）
+  有值时优先使用，与推算不一致的公司会打印出来。
   1FY/2FY/3FY 归到截止年份 Y 后，
   CY(Y) = m/12 × V(Y) + (1 − m/12) × V(Y+1)；V(Y) 缺 BBG 时（已报财年）用 Wind 明细中的已报值（已折港元）。
 历史对比日：若某财年（截止于当前 1FY 前一年）在对比日之后约 3 个月内才报出，则对比日的 1FY/2FY 相当于当前的
@@ -91,6 +92,11 @@ def bbg_calendar(wind, raw, num, dt, windows, date, by, fy):
         rep = wind[f"FY{by}来源"].eq("已报")
         reported[rep] = (wind.loc[rep, f"FY{by}原币"] * wind.loc[rep, "折算系数"]).astype(float)
 
+    inferred = pd.Series({c: first_unreported_end(months[c], date) for c in wind.index})
+    diff = end_given.notna() & (end_given.dt.to_period("M") != inferred.dt.to_period("M"))
+    if diff.any():
+        print(f"提示：{int(diff.sum())} 只 BBG 1FY 截止日与推算不同，以 BBG 为准："
+              + "、".join(f"{c}({end_given[c].date()} vs {inferred[c].date()})" for c in diff[diff].index[:10]), flush=True)
     rows = []
     for c in wind.index:
         if pd.isna(cur["1FY"].get(c)) and pd.isna(cur["2FY"].get(c)):
@@ -98,7 +104,7 @@ def bbg_calendar(wind, raw, num, dt, windows, date, by, fy):
             continue
         e1 = end_given.get(c)
         if pd.isna(e1):
-            e1 = first_unreported_end(months[c], date)
+            e1 = inferred[c]
         m, y1 = e1.month, e1.year
         vals = {y1: cur["1FY"][c], y1 + 1: cur["2FY"][c], y1 + 2: cur["3FY"][c]}
         if pd.notna(reported.get(c)) and (y1 - 1) not in vals:
