@@ -201,6 +201,19 @@ details.notes ol { padding-left: 20px; margin: 8px 0 0; }
 
 <script>
 const DATA = /*__DATA__*/null;
+if (!DATA) {
+  // 直接打开模板：这里没有数据，提示改开生成后的看板文件
+  document.querySelector(".wrap").innerHTML = `<section class="panel" style="margin-top:24px">
+    <h2>这是看板模板，本身不含数据</h2>
+    <p class="hint" style="font-size:14px;line-height:1.8;color:var(--ink-2)">
+      请打开脚本生成的看板文件，例如：<br>
+      · 申万一级_2027盈利预期_latest.html<br>
+      · 港股_恒生一级_2027盈利预期_latest.html / 港股_Wind二级_2027盈利预期_latest.html<br>
+      它们由 sw1_consensus_2027.py / hk_consensus_2027.py 运行结束时自动生成，与 Excel 在同一目录。<br>
+      也可以从已有 Excel 单独生成：python build_dashboard.py 某某.xlsx
+    </p></section>`;
+  throw new Error("dashboard_template.html 是模板，请打开生成后的看板文件");
+}
 const FY = DATA.forecastYear, BY = DATA.baseYear, W = DATA.windows;
 let revWindow = W[0];
 let sortKey = "g", sortDir = -1;
