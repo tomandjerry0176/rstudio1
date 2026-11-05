@@ -17,6 +17,6 @@ d['user50']=np.where((f.abs()>50)&(~W),f,0.0)
 a=pd.read_excel(F,'成交额',header=None)
 codes=a.iloc[2,1:24].tolist()
 a=a.iloc[3:]; a=a[pd.to_datetime(a[0],errors='coerce').notna()]
-A=pd.DataFrame({c:pd.to_numeric(a[i+1],errors='coerce').values for i,c in enumerate(codes)},index=pd.to_datetime(a[0]))
+A=pd.DataFrame({c:pd.to_numeric(a[i+1],errors='coerce').values for i,c in enumerate(codes)},index=pd.to_datetime(a[0])).reindex(d.index)
 Abase=A.rolling(120,min_periods=40).quantile(0.2).shift(1).bfill()
 Aex=(A-Abase).clip(lower=0)

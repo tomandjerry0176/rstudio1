@@ -9,7 +9,8 @@ def load():
     b=b[pd.to_datetime(b[0],errors='coerce').notna()]
     flow=pd.Series(pd.to_numeric(b[24],errors='coerce').values,index=pd.to_datetime(b[0]),name='flow')
     nb=pd.Series(pd.to_numeric(b[26],errors='coerce').values,index=pd.to_datetime(b[0]),name='nb')
-    return pd.concat([amt,flow,nb],axis=1)
+    out=pd.concat([amt,flow,nb],axis=1)
+    return out[out.amt.notna()]   # 去掉还没有成交额的空日期行
 
 def raw():
     x=pd.read_excel(F,'份额 均价fml',header=None)
