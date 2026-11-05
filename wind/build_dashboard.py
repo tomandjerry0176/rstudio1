@@ -204,7 +204,8 @@ if __name__ == "__main__":
     src = Path(args.xlsx)
     dst = Path(args.html) if args.html else src.with_suffix(".html")
     title = args.title or (
-        ("港股 · Wind二级行业" if "Wind二级" in src.name else "港股 · 恒生一级行业")
+        ("港股 · GICS二级行业" if "GICS二级" in src.name else "港股 · Wind二级行业" if "Wind二级" in src.name
+         else "港股 · 恒生一级行业")
         if src.name.startswith("港股") else "申万一级行业"
     )
     print(f"看板已保存：{build(src, dst, title)}")

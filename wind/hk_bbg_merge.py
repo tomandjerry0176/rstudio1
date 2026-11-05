@@ -142,6 +142,7 @@ def main():
     ap.add_argument("--bbg", required=True)
     ap.add_argument("--mode", choices=["fill", "full", "full-fy"], default="fill")
     ap.add_argument("--out-dir")
+    ap.add_argument("--gics", help="BBG 导出的 GICS 分类表：给出时把行业改为 GICS 二级（覆盖 Wind 明细中的行业）")
     a = ap.parse_args()
 
     sheets = pd.read_excel(a.wind, sheet_name=None)
@@ -166,6 +167,11 @@ def main():
     has_bbg = b[f"BBG_NP{fy}"].notna()
     print(f"BBG 有 {fy}E 日历年预测：{int(has_bbg.sum())} / {len(wind)} 只", flush=True)
 
+    if a.gics:
+        import hk_consensus_2027 as hk_cls
+        g = hk_cls.load_gics(a.gics, "IndGrp").reindex(wind.index)
+        print(f"GICS 二级：匹配 {int(g.notna().sum())} / {len(wind)} 只", flush=True)
+        wind["行业"] = g.fillna("未分类")
     d = wind.copy()
     for col in ("基期提示", "预测来源", "口径", "FY%d来源" % by):
         if col in d:   # Excel 读回的空字符串会变成 NaN，统一还原为空串，避免 NaN != "" 被当成有标记
@@ -215,14 +221,16 @@ def main():
                              if a.mode == "fill" else "全部公司改用 BBG BEST_NET_INCOME（BBG 标准口径，部分为经调整）；"
                              + ("“2026E / 2027E”列实为各公司相对财年 FY1 / FY2，未做日历化，用于对照 BBG 指数 FY1/FY2；"
                                 if a.mode == "full-fy" else ""))
-         + "BBG 金额以 EQY_FUND_CRNCY=HKD 换算港元，市值、行业沿用 Wind 明细。"),
-        "BBG 相对财年按 BEST_PERIOD_END_DT 归到截止年份后日历化：CY(Y) = m/12×V(Y) + (1−m/12)×V(Y+1)；"
+         + "BBG 金额以 EQY_FUND_CRNCY=HKD 换算港元，市值沿用 Wind 明细；"
+         + ("行业按 BBG GICS 二级（行业组）分类。" if a.gics else "行业沿用 Wind 明细。")),
+        "BBG 相对财年按 BEST_PERIOD_END_DATE（缺失时按财年截止月推算）归到截止年份后日历化：CY(Y) = m/12×V(Y) + (1−m/12)×V(Y+1)；"
         "已报财年缺 BBG 值时用 Wind 已报值（折港元）。历史对比日按“前一财年截止 + 3 个月才报出”近似判断是否错开一位。",
         f"同一公司多条股票线只计一条：{'、'.join(f'{k} 以 {v} 为准' for k, v in DUPLICATE_LINES.items())}。",
     ]
     notes = notes[:-1] + extra + notes[-1:]
     stem = Path(a.wind).stem
-    cls = "恒生一级" if "恒生一级" in stem else "Wind二级" if "Wind二级" in stem else "行业"
+    cls = ("GICS二级" if a.gics else "恒生一级" if "恒生一级" in stem else "GICS二级" if "GICS二级" in stem
+           else "Wind二级" if "Wind二级" in stem else "行业")
     title = f"港股 · {cls}行业（{title_tag}）"
     out_stem = f"港股_{cls}_{fy}盈利预期_{stem_tag}"
     out = core.write_outputs(rows, [d], notes, out_stem, title)

@@ -42,14 +42,53 @@ FIN_DIR = Path(__file__).resolve().parent
 # 股票池：恒生综合指数（约 500 只，覆盖港股约 95% 市值）
 UNIVERSE_INDEX = "HSCI.HI"
 
-# 行业分类：一次取数，按每种分类各出一套 Excel / 看板；字段取不到的分类跳过并提示
-# Wind 行业沿用 wind_fields.json 中 probe 选定的 wicsname2024；恒生行业级别参数为 category。
+# 行业分类：一次取数，按每种分类各出一套 Excel / 看板；取不到的分类跳过并提示
+# 恒生一级：Wind 字段 industry_hs（级别参数 category）。
+# GICS二级：读 BBG 导出的 GICS 分类表（EQS 导出，列含 Ticker / GICS Ind Grp Name），按 GICS 官方中文名显示；
+#           不再使用 Wind 二级（wicsname2024），2026-11-05 起按用户要求改为 GICS。
 CLASSIFICATIONS = {
     "恒生一级": {"field": "industry_hs", "options": "tradeDate={date};category=1",
                  "title": "港股 · 恒生一级行业"},
-    "Wind二级": {"field": "wicsname2024", "options": "tradeDate={date};industryType=2",
-                 "title": "港股 · Wind二级行业"},
+    "GICS二级": {"source": "gics_file", "level": "IndGrp", "title": "港股 · GICS二级行业"},
 }
+# BBG 导出的 GICS 分类表；新上市公司缺分类时归入“未分类”，需要时在 BBG 重新导出覆盖
+GICS_FILE = Path("/Users/amber/Documents/本地数据库/财报/港股GICS分类.xlsx")
+GICS_CN = {   # GICS 行业组（二级）中文名
+    "Energy": "能源", "Materials": "原材料", "Capital Goods": "资本品",
+    "Commercial & Professional Services": "商业和专业服务", "Transportation": "运输",
+    "Automobiles & Components": "汽车与汽车零部件", "Consumer Durables & Apparel": "耐用消费品与服装",
+    "Consumer Services": "消费者服务", "Consumer Discretionary Distribution & Retail": "非必需消费品分销与零售",
+    "Retailing": "零售业", "Consumer Staples Distribution & Retail": "日常消费品分销与零售",
+    "Food & Staples Retailing": "食品与主要用品零售", "Food, Beverage & Tobacco": "食品、饮料与烟草",
+    "Household & Personal Products": "家庭与个人用品", "Health Care Equipment & Services": "医疗保健设备与服务",
+    "Pharmaceuticals, Biotechnology & Life Sciences": "制药、生物科技与生命科学", "Banks": "银行",
+    "Financial Services": "金融服务", "Diversified Financials": "综合金融", "Insurance": "保险",
+    "Software & Services": "软件与服务", "Technology Hardware & Equipment": "技术硬件与设备",
+    "Semiconductors & Semiconductor Equipment": "半导体产品与设备", "Telecommunication Services": "电信服务",
+    "Media & Entertainment": "媒体与娱乐", "Utilities": "公用事业",
+    "Equity Real Estate Investment Trusts (REITs)": "权益型房地产投资信托",
+    "Real Estate Management & Development": "房地产管理和开发", "Real Estate": "房地产",
+}
+
+
+def load_gics(path=None, level="IndGrp"):
+    """读取 BBG 导出的 GICS 分类表 → Series（Wind 代码 → 中文行业名）。level：Sector / IndGrp / Ind。"""
+    path = Path(path or GICS_FILE)
+    raw = pd.read_excel(path, header=None)
+    first = raw.iloc[:, 0].astype(str).str.strip()
+    if not first.eq("Ticker").any():
+        raise RuntimeError(f"{path} 中找不到表头 Ticker（应为 BBG EQS 导出）")
+    hdr = int(first[first.eq("Ticker")].index[0])
+    head = raw.iloc[hdr].astype(str).str.strip().tolist()
+    col = {"Sector": "GICS Sector", "IndGrp": "GICS Ind Grp Name", "Ind": "GICS Ind Name"}[level]
+    if col not in head:
+        raise RuntimeError(f"{path} 缺少列 {col}，实际列：{head}")
+    body = raw.iloc[hdr + 1:, [0, head.index(col)]]
+    body.columns = ["ticker", "name"]
+    m = body["ticker"].astype(str).str.extract(r"^\s*(\d+)\s+HK\s+Equity", expand=False)
+    body = body[m.notna()].assign(code=m[m.notna()].astype(int).map(lambda n: f"{n:04d}.HK"))
+    body = body.dropna(subset=["name"]).drop_duplicates("code")
+    return body.set_index("code")["name"].map(lambda x: GICS_CN.get(str(x).strip(), str(x).strip()))
 
 # 一致预期的币种："report" = 报表原币（需按报表币种折算）；"HKD" = Wind 已折为港元。以 --check 结论为准
 CONSENSUS_CCY = "report"
@@ -322,7 +361,8 @@ def hk_notes(revision_dates, universe_size, cls_name, rate_date):
         "个股增速中位数仅统计基期预测利润大于零的公司。",
         "空白表示缺失或不适用，不以零填补。",
     ]
-    lines[1] = (f"股票池为{UNIVERSE_INDEX}成分股（{universe_size}只），按{cls_name}分类（字段 {cls['field']}）；"
+    src = f"字段 {cls['field']}" if "field" in cls else f"BBG GICS 分类表 {GICS_FILE.name}"
+    lines[1] = (f"股票池为{UNIVERSE_INDEX}成分股（{universe_size}只），按{cls_name}分类（{src}）；"
                 "只汇总有 Wind 一致预期覆盖的公司，不代表全行业盈利。")
     lines.insert(2, ("一致预期按报表原币取数（WindPy currencyType 对港股无效），用财报库 hk_fx_profile 识别的报表币种、"
                      f"按人民币中间价（{rate_date}）交叉折算为港元；币种未识别的公司不计入，"
@@ -421,6 +461,15 @@ def run_check(w, con, hk_fx):
     print(f"ErrorCode={err}，成分股 {len(codes)} 只")
 
     for name, cfg in CLASSIFICATIONS.items():
+        if cfg.get("source") == "gics_file":
+            print(f"\n== 行业分类：{name}（{GICS_FILE}）")
+            try:
+                g = load_gics(GICS_FILE, cfg["level"])
+                print(f"共 {len(g)} 只；成分股匹配 {int(pd.Index(codes).isin(g.index).sum())} / {len(codes)}")
+                print(g.reindex(CHECK_CODES).to_string())
+            except Exception as exc:   # noqa: BLE001
+                print(f"读取失败：{exc}")
+            continue
         print(f"\n== 行业分类：{name}（{cfg['field']}）")
         e, frame = w.wss(CHECK_CODES, cfg["field"], cfg["options"].format(date=DATE.replace("-", "")), usedf=True)
         print(frame.to_string() if e == 0 else f"ErrorCode={e}：字段不可用，正式运行会跳过该分类")
@@ -627,15 +676,22 @@ def run(w, con, hk_fx, rate_date):
 
     done = 0
     for cls_name, cls in CLASSIFICATIONS.items():
-        err, ind = w.wss(codes, cls["field"], cls["options"].format(date=DATE.replace("-", "")), usedf=True)
-        if err != 0:
-            print(f"跳过 {cls_name}：字段 {cls['field']} 返回 ErrorCode={err}", flush=True)
-            continue
-        ind = normalize_wss(ind, cls_name).reindex(codes).iloc[:, 0]
-        # 恒生行业返回值带“(HS)”后缀，如“资讯科技业(HS)”，去掉便于阅读
-        labels = ind.astype("string").str.strip().str.replace(r"\s*\(HS\)$", "", regex=True).replace("", pd.NA)
+        if cls.get("source") == "gics_file":
+            try:
+                labels = load_gics(GICS_FILE, cls["level"]).reindex(codes).astype("string")
+            except Exception as exc:   # noqa: BLE001
+                print(f"跳过 {cls_name}：{exc}", flush=True)
+                continue
+        else:
+            err, ind = w.wss(codes, cls["field"], cls["options"].format(date=DATE.replace("-", "")), usedf=True)
+            if err != 0:
+                print(f"跳过 {cls_name}：字段 {cls['field']} 返回 ErrorCode={err}", flush=True)
+                continue
+            ind = normalize_wss(ind, cls_name).reindex(codes).iloc[:, 0]
+            # 恒生行业返回值带“(HS)”后缀，如“资讯科技业(HS)”，去掉便于阅读
+            labels = ind.astype("string").str.strip().str.replace(r"\s*\(HS\)$", "", regex=True).replace("", pd.NA)
         if labels.isna().all():
-            print(f"跳过 {cls_name}：字段 {cls['field']} 全部为空", flush=True)
+            print(f"跳过 {cls_name}：分类全部为空", flush=True)
             continue
         dc = d.copy()
         dc["行业"] = labels.fillna("未分类")
