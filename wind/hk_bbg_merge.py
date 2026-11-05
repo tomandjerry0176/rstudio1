@@ -5,6 +5,7 @@
     python hk_bbg_merge.py --wind ... --bbg ... --mode full
   fill：Wind 为主，只对 Wind 无 2027E 预测（预测来源=无预测）的公司用 BBG 补；同一公司的多条股票线只补一条
   full：全部改用 BBG 一致预期（市值、行业、币种折算后的已报基期沿用 Wind 明细），另出 Wind 与 BBG 逐行业对照
+  full-fy：全部用 BBG 相对财年 FY1 → FY2（不做日历化），与 BBG 指数 FY1/FY2 的构造一致，用于拆解指数层面的差异
 输出与港股脚本同格式（行业汇总 / 个股明细 / 统计说明 + 看板），可直接作为 index_consensus.py 的 --h 输入。
 
 BBG 相对财年 → 日历年：1FY 的截止日 = 财年截止月 m（Wind 明细“财年截止月”，缺失时用 BBG EQY_FISCAL_YR_END，再缺按 12 月）
@@ -118,6 +119,11 @@ def bbg_calendar(wind, raw, num, dt, windows, date, by, fy):
             pv = {base_y: past[w]["1FY"][c], base_y + 1: past[w]["2FY"][c], base_y + 2: past[w]["3FY"][c]}
             rec[f"BBG_NP{fy}_{w}前"] = to_calendar(pv, m, fy)
         rec["BBG口径"] = "12月财年" if m == 12 else "日历化"
+        # 相对财年（不日历化）：FY1 → FY2；对比日若尚未滚动，则当时的 2FY 对应现在的 1FY，3FY 对应 2FY
+        rec[f"BBGFY_NP{by}"], rec[f"BBGFY_NP{fy}"] = cur["1FY"][c], cur["2FY"][c]
+        for w, t in windows.items():
+            shift = t < prev_end + pd.DateOffset(months=REPORT_LAG_MONTHS)
+            rec[f"BBGFY_NP{fy}_{w}前"] = past[w]["3FY" if shift else "2FY"][c]
         rows.append(rec)
     return pd.DataFrame(rows, index=wind.index)
 
@@ -126,7 +132,7 @@ def main():
     ap = argparse.ArgumentParser(description="BBG 一致预期合并进港股流程")
     ap.add_argument("--wind", required=True)
     ap.add_argument("--bbg", required=True)
-    ap.add_argument("--mode", choices=["fill", "full"], default="fill")
+    ap.add_argument("--mode", choices=["fill", "full", "full-fy"], default="fill")
     ap.add_argument("--out-dir")
     a = ap.parse_args()
 
@@ -153,24 +159,30 @@ def main():
     print(f"BBG 有 {fy}E 日历年预测：{int(has_bbg.sum())} / {len(wind)} 只", flush=True)
 
     d = wind.copy()
+    for col in ("基期提示", "预测来源", "口径", "FY%d来源" % by):
+        if col in d:   # Excel 读回的空字符串会变成 NaN，统一还原为空串，避免 NaN != "" 被当成有标记
+            d[col] = d[col].fillna("").astype(str)
     cols = [np_ for np_ in [f"NP{by}", f"NP{fy}"] + [f"NP{fy}_{w}前" for w in wins]]
-    if "预测来源" not in d:
+    if "预测来源" not in d or d["预测来源"].eq("").all():
         d["预测来源"] = np.where(d[f"NP{fy}"].notna(), "H股一致预期", "无预测")
     if a.mode == "fill":
         target = d[f"NP{fy}"].isna() & has_bbg & ~d.index.isin(list(DUPLICATE_LINES))
         stem_tag, title_tag = "BBG补缺", "BBG 补缺"
     else:
         target = pd.Series(True, index=d.index) & ~d.index.isin(list(DUPLICATE_LINES))
-        stem_tag, title_tag = "BBG全量", "BBG 全量"
+        stem_tag, title_tag = ("BBG全量", "BBG 全量") if a.mode == "full" else ("BBG相对财年", "BBG 相对财年 FY1→FY2")
+    pre = "BBGFY_" if a.mode == "full-fy" else "BBG_"
+    if a.mode == "full-fy":
+        has_bbg = b[f"BBGFY_NP{fy}"].notna()
     for col in cols:
-        d.loc[target, col] = b.loc[target, "BBG_" + col] if "BBG_" + col in b else np.nan
-    if a.mode == "full":
+        d.loc[target, col] = b.loc[target, pre + col] if pre + col in b else np.nan
+    if a.mode != "fill":
         d.loc[d.index.isin(list(DUPLICATE_LINES)), cols] = np.nan
     d.loc[target, "预测来源"] = np.where(has_bbg[target], "BBG一致预期", "无预测")
-    d.loc[target, "口径"] = b.loc[target, "BBG口径"]
-    # 基期提示按 BBG 日历年数（港元）重算被替换的行
-    d.loc[target, f"FY{by}原币"] = b.loc[target, f"BBG_NP{by}"]
-    d.loc[target, f"FY{fy}原币"] = b.loc[target, f"BBG_NP{fy}"]
+    d.loc[target, "口径"] = b.loc[target, "BBG口径"] if a.mode != "full-fy" else "相对财年"
+    # 基期提示按替换后的数（港元）重算被替换的行
+    d.loc[target, f"FY{by}原币"] = b.loc[target, f"{pre}NP{by}"]
+    d.loc[target, f"FY{fy}原币"] = b.loc[target, f"{pre}NP{fy}"]
     if "基期提示" in d:
         base, nxt = d[f"FY{by}原币"], d[f"FY{fy}原币"]
         flag = (base > 0) & nxt.notna() & (nxt < base * 0.7)
@@ -192,7 +204,9 @@ def main():
     notes = sheets["统计说明"].iloc[:, 0].dropna().astype(str).tolist()
     extra = [
         (f"{title_tag}：" + ("Wind 无 2027E 预测的公司用 BBG BEST_NET_INCOME 补，个股明细“预测来源”=BBG一致预期；"
-                             if a.mode == "fill" else "全部公司改用 BBG BEST_NET_INCOME（BBG 标准口径，部分为经调整）；")
+                             if a.mode == "fill" else "全部公司改用 BBG BEST_NET_INCOME（BBG 标准口径，部分为经调整）；"
+                             + ("“2026E / 2027E”列实为各公司相对财年 FY1 / FY2，未做日历化，用于对照 BBG 指数 FY1/FY2；"
+                                if a.mode == "full-fy" else ""))
          + "BBG 金额以 EQY_FUND_CRNCY=HKD 换算港元，市值、行业沿用 Wind 明细。"),
         "BBG 相对财年按 BEST_PERIOD_END_DT 归到截止年份后日历化：CY(Y) = m/12×V(Y) + (1−m/12)×V(Y+1)；"
         "已报财年缺 BBG 值时用 Wind 已报值（折港元）。历史对比日按“前一财年截止 + 3 个月才报出”近似判断是否错开一位。",
