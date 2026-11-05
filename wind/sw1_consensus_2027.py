@@ -17,7 +17,8 @@ FORECAST_YEAR = 2027
 REVISION_WINDOWS = {"1个月": 21, "2个月": 42, "3个月": 63}
 TOP_N = 3
 # 提示标签阈值
-SMALL_SAMPLE = 10          # 有预测家数少于此值 -> 小样本
+SMALL_SAMPLE = 10          # 有预测家数少于此值、且市值覆盖率低于下一项 -> 小样本
+SMALL_SAMPLE_COVERAGE = 0.8
 TURNAROUND_SHARE = 0.5     # 基期亏损公司贡献的增量占比超过此值 -> 扭亏驱动
 SINGLE_NAME_SHARE = 0.35   # 单一公司贡献的增量占比超过此值 -> 单一公司主导
 CONCENTRATION = 0.6        # 前 TOP_N 公司利润占比超过此值 -> 集中度高
@@ -155,7 +156,8 @@ def increment_stats(d):
 
 def flag_text(row):
     flags = []
-    if row[f"有{FORECAST_YEAR}预测家数"] < SMALL_SAMPLE:
+    cov = row.get("预测样本市值覆盖率(已知市值口径)")
+    if row[f"有{FORECAST_YEAR}预测家数"] < SMALL_SAMPLE and not (pd.notna(cov) and cov >= SMALL_SAMPLE_COVERAGE):
         flags.append("小样本")
     base = row[f"{BASE_YEAR}E净利润(亿,共同样本)"]
     if pd.notna(base) and base <= 0:
@@ -234,7 +236,7 @@ def note_lines(revision_dates, date=None):
         f"增量 = 共同样本{FORECAST_YEAR}E与{BASE_YEAR}E预测利润之差；扭亏贡献占比 = 基期预测利润"
         "小于等于零的公司贡献的增量 / 行业总增量；总增量小于等于零时留空。",
         "最大增量公司 = 共同样本中增量最大的一家；剔除后增速为去掉该公司后的共同样本增速。",
-        f"提示标签：有预测家数<{SMALL_SAMPLE}为小样本；基期合计亏损为基期亏损；扭亏贡献>"
+        f"提示标签：有预测家数<{SMALL_SAMPLE}且市值覆盖率<{SMALL_SAMPLE_COVERAGE:.0%}为小样本；基期合计亏损为基期亏损；扭亏贡献>"
         f"{TURNAROUND_SHARE:.0%}为扭亏驱动；单一公司增量占比>{SINGLE_NAME_SHARE:.0%}为单一公司主导；"
         f"前{TOP_N}公司利润占比>{CONCENTRATION:.0%}为集中度高。",
         "Excel空白表示数据缺失或该指标不适用；市值全部为空时终止，不写入本次结果。",

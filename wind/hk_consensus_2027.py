@@ -66,6 +66,26 @@ MANUAL_FX = {
 # 手动指定财年截止月（hk_fye 无记录的公司）；不填则按财年口径直接使用
 MANUAL_FYE = {}
 
+# H 股没有 Wind 一致预期时，用对应 A 股的一致预期补（只补 H 股为空的年份；代码需在 Wind 终端核对）
+#   "same"：A+H 为同一家公司，利润相同，直接使用 A 股预测（人民币）
+#   "scale"：不同上市主体（中国联通红筹公司 0762.HK 与 A 股控股公司 600050.SH），
+#            按最近完整年度（BASE_YEAR-1）已报归母净利润之比换算：H 预测 = A 预测 × H 已报 / A 已报
+A_PROXY = {
+    "1919.HK": ("601919.SH", "same"),    # 中远海控
+    "3986.HK": ("603986.SH", "same"),    # 兆易创新
+    "1171.HK": ("600188.SH", "same"),    # 兖矿能源
+    "0914.HK": ("600585.SH", "same"),    # 海螺水泥
+    "0358.HK": ("600362.SH", "same"),    # 江西铜业
+    "1787.HK": ("600547.SH", "same"),    # 山东黄金
+    "1800.HK": ("601800.SH", "same"),    # 中国交建
+    "1071.HK": ("600027.SH", "same"),    # 华电国际
+    "0991.HK": ("601991.SH", "same"),    # 大唐发电
+    "1157.HK": ("000157.SZ", "same"),    # 中联重科
+    "0317.HK": ("600685.SH", "same"),    # 中船防务
+    "1513.HK": ("000513.SZ", "same"),    # 丽珠医药（A 股：丽珠集团）
+    "0762.HK": ("600050.SH", "scale"),   # 中国联通：红筹公司 vs A 股控股公司
+}
+
 # 基期一次性因素：个股基期（FY{BASE}）利润明显高于下一财年时标注
 ONE_OFF_DROP = 0.30           # 基期为一致预期：下一年较基期下降超过 30%
 ONE_OFF_DROP_REPORTED = 0.05  # 基期为已报利润：下一年预期低于已报超过 5%（已报含一次性损益，预期通常不含）
@@ -190,6 +210,52 @@ def fetch_years(w, codes, years, trade_date, label):
     return out
 
 
+def proxy_ratios(w, codes):
+    """A_PROXY 中在股票池内的 H 股 -> 换算比例。same = 1；scale = H 已报 / A 已报（BASE_YEAR-1 年报，原币）。"""
+    ratio = {h: 1.0 for h, (a, mode) in A_PROXY.items() if mode == "same" and h in codes}
+    pairs = {h: a for h, (a, mode) in A_PROXY.items() if mode == "scale" and h in codes}
+    if pairs:
+        rpt = f"unit=1;rptDate={BASE_YEAR - 1}1231;rptType=1"
+        hv = wss(w, list(pairs), "np_belongto_parcomsh", rpt, "A 股代理换算：H 股已报")["NP_BELONGTO_PARCOMSH"]
+        av = wss(w, list(pairs.values()), "np_belongto_parcomsh", rpt, "A 股代理换算：A 股已报")["NP_BELONGTO_PARCOMSH"]
+        for h, a in pairs.items():
+            hn, an = pd.to_numeric(hv.get(h), errors="coerce"), pd.to_numeric(av.get(a), errors="coerce")
+            r = hn / an if pd.notna(hn) and pd.notna(an) and hn > 0 and an > 0 else float("nan")
+            if pd.notna(r):
+                ratio[h] = float(r)
+                print(f"A 股代理：{h} = {a} × {r:.3f}（{BASE_YEAR - 1} 年已报利润之比）", flush=True)
+            else:
+                print(f"警告：{h} / {a} {BASE_YEAR - 1} 年已报利润缺失或不为正，不做代理", flush=True)
+    return ratio
+
+
+def proxy_targets(got, ratio):
+    """需要代理的 H 股：在 A_PROXY 中、比例有效，且 H 股没有 FORECAST_YEAR 一致预期。整家公司切换，不逐年混用。"""
+    np_f = got[FORECAST_YEAR][0]
+    return [h for h in ratio if h in np_f.index and pd.isna(np_f.get(h))]
+
+
+def apply_proxy(w, codes, got, years, trade_date, ratio, label, targets):
+    """got = {year: (利润, 机构数)}：targets 中的 H 股各年份都改用 A 股一致预期 × 比例，原地更新；返回被补的股票。"""
+    used = pd.Series(False, index=pd.Index(codes))
+    hs = [h for h in targets if h in used.index]
+    if not hs:
+        return used
+    a_codes = [A_PROXY[h][0] for h in hs]
+    for year in years:
+        e = wss(w, a_codes, "west_netprofit,west_instnum",
+                f"year={year};tradeDate={trade_date};westPeriod=180;unit=1", f"{label} A 股代理 FY{year}")
+        npa = pd.to_numeric(e["WEST_NETPROFIT"], errors="coerce")
+        insta = pd.to_numeric(e["WEST_INSTNUM"], errors="coerce")
+        np_, inst = got[year][0].copy(), got[year][1].copy()
+        for h, a in zip(hs, a_codes):
+            np_[h] = npa.get(a) * ratio[h] if pd.notna(npa.get(a)) else np.nan
+            inst[h] = insta.get(a)
+            used[h] = used[h] or pd.notna(npa.get(a))
+        got[year] = (np_, inst)
+    return used
+
+
 def calendarize(fy, fy_next, month):
     """返回 (日历年利润, 口径标签)。12 月年结、截止月未知或缺下一财年预测时直接用财年数。"""
     fy, fy_next = fy.astype(float), fy_next.astype(float)
@@ -264,7 +330,10 @@ def hk_notes(revision_dates, universe_size, cls_name, rate_date):
                      "无当前币种但有历史系数的沿用历史系数（个股明细“折算方式”为 approx）。"
                      if CONSENSUS_CCY == "report" else "一致预期经 --check 确认已由 Wind 折为港元，未再折算。")
                  + "金额单位亿港元；市值 mkt_cap_ard 为港元（A+H 公司为各类股份合计市值）。")
-    lines.insert(3, f"基期财年已结束、Wind 不再保留一致预期的公司（如 3 月年结的 FY{BASE_YEAR}），用已报归母净利润（原币）"
+    lines.insert(3, "H 股无 Wind 一致预期时用对应 A 股一致预期补（个股明细“预测来源”列标注）：A+H 同一公司直接使用；"
+                    f"中国联通红筹（0762.HK）与 A 股（600050.SH）为不同主体，按 {BASE_YEAR - 1} 年已报归母净利润之比换算。"
+                    "预期修正对 A 股代理同样处理。")
+    lines.insert(4, f"基期财年已结束、Wind 不再保留一致预期的公司（如 3 月年结的 FY{BASE_YEAR}），用已报归母净利润（原币）"
                     f"补足基期，个股明细“FY{BASE_YEAR}来源”列标注。"
                     "非12月年结公司按财报库 hk_fye 识别的财年截止月 m 日历化：CY(Y) = m/12×FY(Y) + (1−m/12)×FY(Y+1)；"
                     "缺下一财年预测或截止月未知时退回财年口径，个股明细“口径”列逐只标注。"
@@ -272,7 +341,8 @@ def hk_notes(revision_dates, universe_size, cls_name, rate_date):
     if hasattr(core, "flag_text"):
         lines.insert(-1, "增量 = 共同样本两年预测利润之差；扭亏贡献占比 = 基期亏损公司贡献的增量 / 行业总增量；"
                          "最大增量公司为共同样本中增量最大的一家，剔除后增速为去掉该公司后的共同样本增速。")
-        lines.insert(-1, f"提示标签：有预测家数<{core.SMALL_SAMPLE}为小样本；基期合计亏损为基期亏损；"
+        lines.insert(-1, f"提示标签：有预测家数<{core.SMALL_SAMPLE}且市值覆盖率<"
+                         f"{getattr(core, 'SMALL_SAMPLE_COVERAGE', 0.8):.0%}为小样本；基期合计亏损为基期亏损；"
                          f"扭亏贡献>{core.TURNAROUND_SHARE:.0%}为扭亏驱动；单一公司增量占比>{core.SINGLE_NAME_SHARE:.0%}"
                          f"为单一公司主导；前{core.TOP_N}公司利润占比>{core.CONCENTRATION:.0%}为集中度高；"
                          f"未能日历化的非12月财年利润占比>{NON_CAL_SHARE:.0%}为财年错位；"
@@ -510,6 +580,15 @@ def run(w, con, hk_fx, rate_date):
 
     fy_years = (BASE_YEAR, FORECAST_YEAR, FORECAST_YEAR + 1)
     raw = fetch_years(w, codes, fy_years, DATE, "当前")
+    ratio = proxy_ratios(w, codes)
+    targets = proxy_targets(raw, ratio)
+    proxied = apply_proxy(w, codes, raw, fy_years, DATE, ratio, "当前", targets)
+    d["预测来源"] = [("" if not proxied[c] else "A股一致预期（同一公司）" if A_PROXY[c][1] == "same"
+                     else f"A股一致预期×{ratio[c]:.3f}") for c in codes]
+    d.loc[~proxied & raw[FORECAST_YEAR][0].notna(), "预测来源"] = "H股一致预期"
+    d.loc[~proxied & raw[FORECAST_YEAR][0].isna(), "预测来源"] = "无预测"
+    if proxied.any():
+        print(f"A 股代理补入 {int(proxied.sum())} 只：{'、'.join(proxied[proxied].index)}", flush=True)
     factor = d["折算系数"]
     for year in fy_years:
         d[f"FY{year}原币"] = raw[year][0]
@@ -538,6 +617,7 @@ def run(w, con, hk_fx, rate_date):
     d[np_col(FORECAST_YEAR)], d["口径"] = calendarize(hkd[FORECAST_YEAR], hkd[FORECAST_YEAR + 1], d["财年截止月"])
     for window, past_date in revision_dates.items():
         past = fetch_years(w, codes, (FORECAST_YEAR, FORECAST_YEAR + 1), past_date, f"{window}前")
+        apply_proxy(w, codes, past, (FORECAST_YEAR, FORECAST_YEAR + 1), past_date, ratio, f"{window}前", targets)
         # 修正只看预期本身的变化：两个日期用同一个（当前）汇率
         d[np_col(FORECAST_YEAR, window)], _ = calendarize(past[FORECAST_YEAR][0] * factor,
                                                           past[FORECAST_YEAR + 1][0] * factor, d["财年截止月"])
